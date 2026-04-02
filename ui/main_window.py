@@ -2,7 +2,6 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QStackedWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 
 from ui.keywords_tab import KeywordsTab
 from ui.trends_tab import TrendsTab
@@ -23,25 +22,7 @@ class TubeVibeApp(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # LEFT SIDEBAR
-        sidebar = QFrame()
-        sidebar.setFixedWidth(220)
-        sidebar.setObjectName("sidebar")
-        s_layout = QVBoxLayout(sidebar)
-        s_layout.setContentsMargins(20, 30, 20, 20)
-        
-        title = QLabel("TubeVibe")
-        title.setObjectName("sidebar_title")
-        title.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
-        subtitle = QLabel("YouTube Research Pro")
-        subtitle.setObjectName("sidebar_subtitle")
-        subtitle.setFont(QFont("Segoe UI", 11))
-        
-        s_layout.addWidget(title)
-        s_layout.addWidget(subtitle)
-        s_layout.addStretch()
-
-        # RIGHT MAIN AREA
+        # MAIN AREA
         right_area = QWidget()
         r_layout = QVBoxLayout(right_area)
         r_layout.setContentsMargins(0, 0, 0, 0)
@@ -80,7 +61,6 @@ class TubeVibeApp(QMainWindow):
         
         r_layout.addWidget(navbar)
         r_layout.addWidget(self.main_stack, stretch=1)
-        main_layout.addWidget(sidebar)
         main_layout.addWidget(right_area, stretch=1)
 
     def switch_tab(self, index):

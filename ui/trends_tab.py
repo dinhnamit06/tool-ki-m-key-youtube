@@ -1,143 +1,380 @@
+import webbrowser
+from datetime import datetime
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, 
-    QPushButton, QFrame, QSizePolicy, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QMessageBox, QMenu, QCheckBox, QTextEdit, QSplitter
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QHeaderView,
+    QWidget,
+    QCheckBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
 
 from core.trends_fetcher import TrendsFetcherWorker
+
+
+class TrendChartDialog(QDialog):
+    def __init__(self, keyword, raw_data, google_trends_url, parent=None):
+        super().__init__(parent)
+        self.keyword = keyword
+        self.raw_data = raw_data or []
+        self.google_trends_url = google_trends_url
+        self.figure = None
+        self.axis = None
+        self.canvas = None
+
+        self.setWindowTitle(f"Searches Over Time - {self.keyword}")
+        self.setModal(True)
+        self.resize(920, 560)
+        self.setStyleSheet(
+            """
+            QDialog { background-color: #f2f2f2; color: #222222; }
+            QPushButton {
+                background-color: #e50914;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-weight: 600;
+                padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #ff1a25; }
+            QPushButton:disabled { background-color: #5a5a5a; color: #cccccc; }
+            QCheckBox { color: #222222; font-weight: 600; }
+            """
+        )
+
+        self._build_ui()
+        self._draw_chart()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        except ImportError:
+            QMessageBox.warning(
+                self,
+                "Chart Error",
+                "matplotlib is missing. Install it with: pip install matplotlib",
+            )
+            self.close()
+            return
+
+        self.figure, self.axis = plt.subplots(figsize=(10, 5))
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas, stretch=1)
+
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+
+        self.btn_view_google = QPushButton("View on Google Trends")
+        self.btn_view_google.setEnabled(bool(self.google_trends_url))
+        self.btn_view_google.clicked.connect(self._open_google_trends)
+
+        self.chk_bar_chart = QCheckBox("Bar Chart")
+        self.chk_bar_chart.stateChanged.connect(self._draw_chart)
+
+        self.btn_save = QPushButton("Save")
+        self.btn_save.clicked.connect(self._save_chart)
+
+        self.btn_close = QPushButton("Close")
+        self.btn_close.clicked.connect(self.accept)
+
+        button_layout.addWidget(self.btn_view_google)
+        button_layout.addStretch()
+        button_layout.addWidget(self.chk_bar_chart)
+        button_layout.addWidget(self.btn_save)
+        button_layout.addWidget(self.btn_close)
+        layout.addLayout(button_layout)
+
+    def _prepare_series(self):
+        dates = []
+        values = []
+        for point in self.raw_data:
+            point_date = str(point.get("date", "")).strip()
+            point_value = point.get("value")
+            if not point_date or point_value is None:
+                continue
+
+            parsed_date = None
+            try:
+                parsed_date = datetime.strptime(point_date, "%Y-%m-%d")
+            except ValueError:
+                try:
+                    parsed_date = datetime.fromisoformat(point_date)
+                except ValueError:
+                    parsed_date = None
+
+            if parsed_date is None:
+                continue
+
+            dates.append(parsed_date)
+            values.append(float(point_value))
+        return dates, values
+
+    def _draw_chart(self):
+        if self.axis is None or self.canvas is None:
+            return
+
+        import matplotlib.dates as mdates
+
+        dates, values = self._prepare_series()
+        self.axis.clear()
+
+        self.figure.patch.set_facecolor("#ffffff")
+        self.axis.set_facecolor("#ffffff")
+
+        if dates and values:
+            if self.chk_bar_chart.isChecked():
+                self.axis.bar(dates, values, color="#e50914", alpha=0.95, width=0.8)
+            else:
+                self.axis.plot(
+                    dates,
+                    values,
+                    color="#c5302c",
+                    linewidth=2.0,
+                    marker="o",
+                    markersize=7,
+                    markerfacecolor="#f44336",
+                    markeredgecolor="#b71c1c",
+                    markeredgewidth=1.4,
+                )
+
+            for x_point, y_point in zip(dates, values):
+                self.axis.annotate(
+                    f"{int(round(y_point))}",
+                    xy=(x_point, y_point),
+                    xytext=(0, 8),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8.5,
+                    color="#303030",
+                    fontweight="semibold",
+                )
+        else:
+            self.axis.text(
+                0.5,
+                0.5,
+                "No trend data available.",
+                transform=self.axis.transAxes,
+                ha="center",
+                va="center",
+                color="#555555",
+            )
+
+        self.axis.set_title(
+            f"Worldwide Search Trends Over Time for {self.keyword}",
+            color="#222222",
+            pad=10,
+            fontsize=11,
+            fontweight="semibold",
+        )
+        self.axis.set_xlabel("Date", color="#333333", labelpad=10)
+        self.axis.set_ylabel("")
+        self.axis.set_ylim(0, 100)
+        self.axis.grid(False)
+
+        for spine in self.axis.spines.values():
+            spine.set_color("#c8c8c8")
+        self.axis.spines["top"].set_visible(False)
+        self.axis.spines["right"].set_visible(False)
+        self.axis.spines["left"].set_visible(False)
+        self.axis.tick_params(axis="x", colors="#444444", labelsize=8)
+        self.axis.tick_params(axis="y", left=False, labelleft=False)
+
+        date_labels = [dt.strftime("%b %d").replace(" 0", " ") for dt in dates]
+        self.axis.set_xticks(dates)
+        self.axis.set_xticklabels(date_labels, rotation=90, ha="center")
+        self.axis.margins(x=0.01)
+
+        if not dates:
+            locator = mdates.AutoDateLocator()
+            formatter = mdates.ConciseDateFormatter(locator)
+            self.axis.xaxis.set_major_locator(locator)
+            self.axis.xaxis.set_major_formatter(formatter)
+
+        self.figure.tight_layout(rect=[0.02, 0.06, 0.98, 0.97])
+        self.canvas.draw_idle()
+
+    def _open_google_trends(self):
+        if self.google_trends_url:
+            webbrowser.open(self.google_trends_url)
+
+    def _save_chart(self):
+        if self.figure is None:
+            return
+        default_name = f"{self.keyword.strip().replace(' ', '_') or 'trend_chart'}.png"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Chart",
+            default_name,
+            "PNG Files (*.png)",
+        )
+        if not path:
+            return
+
+        try:
+            self.figure.savefig(path, dpi=160, facecolor=self.figure.get_facecolor(), bbox_inches="tight")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Error", f"Failed to save chart: {exc}")
+
 
 class TrendsTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self._sparkline_cache = {}
         self.setup_ui()
-        
+
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(35, 30, 35, 30)
         layout.setSpacing(20)
-        
+
         header_label = QLabel("Trends Tool")
         header_label.setObjectName("header_label")
         header_label.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
         layout.addWidget(header_label)
 
-        # --- TRENDS TOP ACTION BAR ---
         top_bar = QFrame()
         top_bar.setStyleSheet("background-color: transparent;")
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.btn_trends_go = QPushButton("Go")
         self.btn_trends_go.setFixedSize(120, 28)
         self.btn_trends_go.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
         self.btn_trends_go.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_trends_go.clicked.connect(self.start_trends_fetch)
-        
+
         self.btn_trends_stop = QPushButton("Stop")
         self.btn_trends_stop.setFixedSize(120, 28)
         self.btn_trends_stop.setStyleSheet("background-color: #444444; color: white; border: none; font-weight: bold; border-radius: 4px;")
         self.btn_trends_stop.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_trends_stop.clicked.connect(self.stop_trends_fetch)
         self.btn_trends_stop.hide()
-        
+
         self.btn_trends_settings = QPushButton("Settings")
         self.btn_trends_settings.setFixedSize(100, 28)
         self.btn_trends_settings.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
         self.btn_trends_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        
+
         self.btn_trends_browser = QPushButton("Browser")
         self.btn_trends_browser.setFixedSize(100, 28)
         self.btn_trends_browser.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
         self.btn_trends_browser.setCursor(Qt.CursorShape.PointingHandCursor)
-        
+
         top_layout.addWidget(self.btn_trends_go)
         top_layout.addWidget(self.btn_trends_stop)
         top_layout.addSpacing(140)
         top_layout.addWidget(self.btn_trends_settings)
         top_layout.addStretch()
         top_layout.addWidget(self.btn_trends_browser)
-        
+
         layout.addWidget(top_bar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # --- LEFT PANEL ---
+
         left_panel = QFrame()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 5, 10, 0)
         left_layout.setSpacing(12)
         left_panel.setStyleSheet("background-color: transparent;")
-        
-        from PyQt6.QtWidgets import QFormLayout
+
         form_layout = QFormLayout()
-        form_layout.setContentsMargins(0,0,0,0)
+        form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setSpacing(8)
-        
+
         combo_style = "background-color: #ffffff; color: #000000; padding: 4px; border: 1px solid #cccccc; border-radius: 2px; font-size: 12px; min-width: 140px;"
         label_style = "color: #f1f1f1; font-size: 13px;"
-        
+
         self.t_combo_country = QComboBox()
         self.t_combo_country.addItems(["Worldwide", "United States", "Viet Nam", "United Kingdom", "Japan"])
         self.t_combo_country.setStyleSheet(combo_style)
         lbl_country = QLabel("Country:")
         lbl_country.setStyleSheet(label_style)
         form_layout.addRow(lbl_country, self.t_combo_country)
-        
+
         self.t_combo_period = QComboBox()
         self.t_combo_period.addItems(["Past 30 days", "Past 7 days", "Past 12 months", "2004 - present"])
         self.t_combo_period.setStyleSheet(combo_style)
         lbl_period = QLabel("Time Period:")
         lbl_period.setStyleSheet(label_style)
         form_layout.addRow(lbl_period, self.t_combo_period)
-        
+
         self.t_combo_cat = QComboBox()
         self.t_combo_cat.addItems(["All Categories", "Arts & Entertainment", "Autos & Vehicles", "Beauty & Fitness", "Games"])
         self.t_combo_cat.setStyleSheet(combo_style)
         lbl_cat = QLabel("Category:")
         lbl_cat.setStyleSheet(label_style)
         form_layout.addRow(lbl_cat, self.t_combo_cat)
-        
+
         self.t_combo_prop = QComboBox()
         self.t_combo_prop.addItems(["Youtube Search", "Web Search", "Image Search", "News Search", "Google Shopping"])
         self.t_combo_prop.setStyleSheet(combo_style)
         lbl_prop = QLabel("Property:")
         lbl_prop.setStyleSheet(label_style)
         form_layout.addRow(lbl_prop, self.t_combo_prop)
-        
+
         left_layout.addLayout(form_layout)
-        
+
         kw_label = QLabel("Enter one keyword per line:")
         kw_label.setStyleSheet("color: #bbbbbb; font-size: 12px; margin-top: 10px;")
         left_layout.addWidget(kw_label)
-        
+
         self.trends_input = QTextEdit()
         self.trends_input.setStyleSheet("background-color: #ffffff; color: #000000; border: 1px solid #aaa; border-radius: 2px;")
         self.trends_input.setText("diy crafts\ndiy wall decor\ndiy videos\ndiy yarn\ndiy upholstered headboard\ndiy zipline\ndiy tiktok\ndiy aquarium")
         left_layout.addWidget(self.trends_input, stretch=1)
-        
-        # --- RIGHT AREA (TABLE) ---
+
         self.trends_table = QTableWidget()
-        self.trends_table.setColumnCount(12)
-        headers = ["✔", "Chart", "🔍 Keyword", "🔍 Country", "🔍 Time Period", "🔍 Category", "🔍 Property", "🔍 Word Count", "🔍 Character Count", "🔍 Total Average", "🔍 Trend Slope", "🔍 Trending Spike"]
+        self.trends_table.setColumnCount(11)
+        headers = [
+            "Chart",
+            "Keyword",
+            "Country",
+            "Time Period",
+            "Category",
+            "Property",
+            "Word Count",
+            "Character Count",
+            "Total Average",
+            "Trend Slope",
+            "Trending Spike",
+        ]
         self.trends_table.setHorizontalHeaderLabels(headers)
-        self.trends_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.trends_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.trends_table.setColumnWidth(0, 30)
-        self.trends_table.setColumnWidth(1, 40)
+        self._setup_trends_table_columns()
+        self.trends_table.verticalHeader().setDefaultSectionSize(36)
         self.trends_table.verticalHeader().setVisible(False)
         self.trends_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.trends_table.setStyleSheet("QTableWidget { background-color: #ffffff; color: #000000; gridline-color: #dddddd; border: 1px solid #cccccc; } QHeaderView::section { background-color: #f0f0f0; color: #000000; font-weight: bold; border: 1px solid #cccccc; padding: 4px; }")
-        self.trends_table.itemDoubleClicked.connect(self.show_trend_chart)
-        
+        self.trends_table.setStyleSheet(
+            "QTableWidget { background-color: #ffffff; color: #000000; gridline-color: #dddddd; border: 1px solid #cccccc; } "
+            "QHeaderView::section { background-color: #f0f0f0; color: #000000; font-weight: bold; border: 1px solid #cccccc; padding: 4px; }"
+        )
+        self.trends_table.cellDoubleClicked.connect(self.show_trend_chart)
+
         splitter.addWidget(left_panel)
         splitter.addWidget(self.trends_table)
         splitter.setSizes([260, 800])
         layout.addWidget(splitter, stretch=1)
-        
-        # --- BOTTOM TOOLBAR ---
+
         bottom_toolbar = QFrame()
         b_layout = QHBoxLayout(bottom_toolbar)
         self.t_btn_vol = QPushButton("Volume Data")
@@ -149,7 +386,7 @@ class TrendsTab(QWidget):
         for btn in [self.t_btn_vol, self.t_btn_hash, self.t_btn_file, self.t_btn_clear]:
             btn.setStyleSheet("background-color: #e50914; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; padding: 7px 18px;")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.t_btn_clear.clicked.connect(lambda: self.trends_table.setRowCount(0))
+        self.t_btn_clear.clicked.connect(self.clear_trends_table)
         b_layout.addWidget(self.t_btn_vol)
         b_layout.addWidget(self.t_btn_hash)
         b_layout.addStretch()
@@ -158,6 +395,133 @@ class TrendsTab(QWidget):
         b_layout.addWidget(self.t_btn_file)
         b_layout.addWidget(self.t_btn_clear)
         layout.addWidget(bottom_toolbar)
+
+    def clear_trends_table(self):
+        self.trends_table.setRowCount(0)
+        self._sparkline_cache.clear()
+        self._apply_trends_table_column_widths()
+        self.t_status.setText("Total Items: 0")
+
+    def _setup_trends_table_columns(self):
+        header = self.trends_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for col in range(2, self.trends_table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+
+        self._trends_col_bounds = {
+            0: (120, 140), # Chart sparkline
+            2: (95, 130),  # Country
+            3: (105, 155), # Time Period
+            4: (95, 150),  # Category
+            5: (95, 145),  # Property
+            6: (85, 120),  # Word Count
+            7: (110, 165), # Character Count
+            8: (95, 130),  # Total Average
+            9: (90, 130),  # Trend Slope
+            10: (100, 145) # Trending Spike
+        }
+        self._apply_trends_table_column_widths()
+
+    def _apply_trends_table_column_widths(self):
+        old_chart_width = self.trends_table.columnWidth(0)
+        for col, (min_width, max_width) in self._trends_col_bounds.items():
+            if col != 0:
+                self.trends_table.resizeColumnToContents(col)
+            width = self.trends_table.columnWidth(col)
+            width = max(min_width, min(width, max_width))
+            self.trends_table.setColumnWidth(col, width)
+        if self.trends_table.columnWidth(0) != old_chart_width:
+            self._refresh_sparklines()
+
+    @staticmethod
+    def _extract_values(raw_data):
+        values = []
+        for point in raw_data or []:
+            value = point.get("value")
+            if value is None:
+                continue
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return values
+
+    def _build_sparkline_pixmap(self, raw_data, width, height):
+        values = self._extract_values(raw_data)
+        if len(values) < 2 or width < 12 or height < 10:
+            return None
+
+        cache_key = (width, height, tuple(round(v, 3) for v in values))
+        if cache_key in self._sparkline_cache:
+            return self._sparkline_cache[cache_key]
+
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        pen = QPen(QColor("#e50914"))
+        pen.setWidthF(1.25)
+        painter.setPen(pen)
+
+        min_v = min(values)
+        max_v = max(values)
+        if max_v == min_v:
+            max_v = min_v + 1.0
+
+        left = 3.0
+        right = float(width) - 3.0
+        top = 3.0
+        bottom = float(height) - 3.0
+        x_step = (right - left) / float(len(values) - 1)
+
+        path = QPainterPath()
+        for idx, value in enumerate(values):
+            x_pos = left + x_step * idx
+            normalized = (value - min_v) / (max_v - min_v)
+            y_pos = bottom - normalized * (bottom - top)
+            if idx == 0:
+                path.moveTo(x_pos, y_pos)
+            else:
+                path.lineTo(x_pos, y_pos)
+
+        painter.drawPath(path)
+        painter.end()
+
+        self._sparkline_cache[cache_key] = pixmap
+        return pixmap
+
+    def _refresh_sparkline_for_row(self, row):
+        sparkline_width = max(40, self.trends_table.columnWidth(0) - 10)
+        chart_item = self.trends_table.item(row, 0)
+        if chart_item is None:
+            return
+
+        payload = chart_item.data(Qt.ItemDataRole.UserRole) or {}
+        raw_data = payload.get("raw_data") or []
+        sparkline_height = max(18, self.trends_table.rowHeight(row) - 6)
+        pixmap = self._build_sparkline_pixmap(raw_data, sparkline_width, sparkline_height)
+
+        if pixmap is None:
+            self.trends_table.removeCellWidget(row, 0)
+            chart_item.setText("")
+            return
+
+        chart_item.setText("")
+        chart_label = self.trends_table.cellWidget(row, 0)
+        if not isinstance(chart_label, QLabel):
+            chart_label = QLabel()
+            chart_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chart_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.trends_table.setCellWidget(row, 0, chart_label)
+        chart_label.setPixmap(pixmap)
+
+    def _refresh_sparklines(self):
+        for row in range(self.trends_table.rowCount()):
+            self._refresh_sparkline_for_row(row)
 
     def start_trends_fetch(self):
         text = self.trends_input.toPlainText()
@@ -169,7 +533,13 @@ class TrendsTab(QWidget):
         self.trends_table.setSortingEnabled(False)
         self.btn_trends_go.hide()
         self.btn_trends_stop.show()
-        self.trends_worker = TrendsFetcherWorker(keywords, self.t_combo_country.currentText(), self.t_combo_period.currentText(), self.t_combo_cat.currentText(), self.t_combo_prop.currentText())
+        self.trends_worker = TrendsFetcherWorker(
+            keywords,
+            self.t_combo_country.currentText(),
+            self.t_combo_period.currentText(),
+            self.t_combo_cat.currentText(),
+            self.t_combo_prop.currentText(),
+        )
         self.trends_worker.progress_signal.connect(self.on_trends_progress)
         self.trends_worker.finished_signal.connect(self.on_trends_finished)
         self.trends_worker.error_signal.connect(self.on_trends_error)
@@ -177,45 +547,82 @@ class TrendsTab(QWidget):
         self.trends_worker.start()
 
     def stop_trends_fetch(self):
-        if hasattr(self, 'trends_worker') and self.trends_worker.isRunning():
+        if hasattr(self, "trends_worker") and self.trends_worker.isRunning():
             self.trends_worker.is_running = False
             self.btn_trends_stop.setText("Stopping...")
 
     def on_trends_progress(self, data):
         row = self.trends_table.rowCount()
         self.trends_table.insertRow(row)
-        chk = QTableWidgetItem(); chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled); chk.setCheckState(Qt.CheckState.Unchecked); self.trends_table.setItem(row, 0, chk)
-        chart = QTableWidgetItem("📈"); chart.setTextAlignment(Qt.AlignmentFlag.AlignCenter); 
-        if data.get("RawData"): chart.setData(Qt.ItemDataRole.UserRole, data["RawData"])
-        self.trends_table.setItem(row, 1, chart)
-        self.trends_table.setItem(row, 2, QTableWidgetItem(str(data["Keyword"])))
-        self.trends_table.setItem(row, 3, QTableWidgetItem(str(data["Country"])))
-        self.trends_table.setItem(row, 4, QTableWidgetItem(str(data["Time Period"])))
-        self.trends_table.setItem(row, 5, QTableWidgetItem(str(data["Category"])))
-        self.trends_table.setItem(row, 6, QTableWidgetItem(str(data["Property"])))
-        for i, val in enumerate([data["Word Count"], data["Character Count"], data["Total Average"], data["Trend Slope"], data["Trending Spike"]], start=7):
-            it = QTableWidgetItem(); it.setData(Qt.ItemDataRole.DisplayRole, val); self.trends_table.setItem(row, i, it)
+
+        raw_data = data.get("RawData") or []
+        chart_item = QTableWidgetItem("")
+        chart_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if raw_data:
+            chart_item.setForeground(QColor("#e50914"))
+            chart_item.setData(
+                Qt.ItemDataRole.UserRole,
+                {
+                    "keyword": data["Keyword"],
+                    "raw_data": raw_data,
+                    "google_trends_url": data.get("GoogleTrendsUrl", ""),
+                },
+            )
+        self.trends_table.setItem(row, 0, chart_item)
+
+        self.trends_table.setItem(row, 1, QTableWidgetItem(str(data["Keyword"])))
+        self.trends_table.setItem(row, 2, QTableWidgetItem(str(data["Country"])))
+        self.trends_table.setItem(row, 3, QTableWidgetItem(str(data["Time Period"])))
+        self.trends_table.setItem(row, 4, QTableWidgetItem(str(data["Category"])))
+        self.trends_table.setItem(row, 5, QTableWidgetItem(str(data["Property"])))
+
+        numeric_values = [
+            data["Word Count"],
+            data["Character Count"],
+            data["Total Average"],
+            data["Trend Slope"],
+            data["Trending Spike"],
+        ]
+        for col, val in enumerate(numeric_values, start=6):
+            item = QTableWidgetItem()
+            item.setData(Qt.ItemDataRole.DisplayRole, val)
+            self.trends_table.setItem(row, col, item)
+
+        self._apply_trends_table_column_widths()
+        self._refresh_sparkline_for_row(row)
         self.t_status.setText(f"Total Items: {self.trends_table.rowCount()}")
 
     def on_trends_finished(self):
-        self.btn_trends_stop.hide(); self.btn_trends_stop.setText("Stop"); self.btn_trends_go.show()
-        self.trends_table.setSortingEnabled(True); self.trends_table.sortItems(9, Qt.SortOrder.DescendingOrder)
+        self.btn_trends_stop.hide()
+        self.btn_trends_stop.setText("Stop")
+        self.btn_trends_go.show()
+        self.trends_table.setSortingEnabled(True)
+        self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
+        self._apply_trends_table_column_widths()
         QMessageBox.information(self, "Finished", "Trends data fetching complete!")
 
     def on_trends_error(self, err):
-        self.btn_trends_stop.hide(); self.btn_trends_go.show()
+        self.btn_trends_stop.hide()
+        self.btn_trends_go.show()
         QMessageBox.critical(self, "Error", err)
 
-    def show_trend_chart(self, item):
-        if item.column() != 1: return
-        data = item.data(Qt.ItemDataRole.UserRole)
-        if not data: return
-        try:
-            import matplotlib.pyplot as plt
-            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-            from PyQt6.QtWidgets import QDialog
-            dialog = QDialog(self); dialog.setWindowTitle(f"Searches Over Time"); dialog.resize(600, 400); l = QVBoxLayout(dialog)
-            fig, ax = plt.subplots(figsize=(6, 4)); ax.plot(data, color='#e50914', linewidth=2, marker='o', markersize=4)
-            ax.set_title(f"Interest Over Time"); ax.grid(True, linestyle='--', alpha=0.6)
-            canvas = FigureCanvas(fig); l.addWidget(canvas); dialog.exec(); plt.close(fig)
-        except Exception as e: QMessageBox.warning(self, "Chart Error", str(e))
+    def show_trend_chart(self, row, column):
+        if column != 0:
+            return
+
+        chart_item = self.trends_table.item(row, 0)
+        if chart_item is None:
+            return
+
+        payload = chart_item.data(Qt.ItemDataRole.UserRole)
+        if not payload:
+            QMessageBox.information(self, "No Data", "No trend data available for this keyword.")
+            return
+
+        dialog = TrendChartDialog(
+            keyword=payload.get("keyword", ""),
+            raw_data=payload.get("raw_data", []),
+            google_trends_url=payload.get("google_trends_url", ""),
+            parent=self,
+        )
+        dialog.exec()

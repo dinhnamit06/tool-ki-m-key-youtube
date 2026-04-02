@@ -1,6 +1,7 @@
 import time
 import random
 import numpy as np
+from urllib.parse import urlencode
 from PyQt6.QtCore import QThread, pyqtSignal
 from utils.constants import CAT_MAP, PROP_MAP, GEO_MAP, TIME_MAP
 
@@ -18,6 +19,18 @@ class TrendsFetcherWorker(QThread):
         self.category = category
         self.gprop = gprop
         self.is_running = True
+
+    @staticmethod
+    def _build_google_trends_url(keyword, timeframe, geo, gprop):
+        params = {
+            "q": keyword,
+            "date": timeframe,
+        }
+        if geo:
+            params["geo"] = geo
+        if gprop:
+            params["gprop"] = gprop
+        return f"https://trends.google.com/trends/explore?{urlencode(params)}"
         
     def run(self):
         try:
@@ -46,17 +59,32 @@ class TrendsFetcherWorker(QThread):
             try:
                 pytrends.build_payload([kw], cat=cat_code, timeframe=tf_code, geo=geo_code, gprop=gprop_code)
                 df = pytrends.interest_over_time()
+                trends_url = self._build_google_trends_url(kw, tf_code, geo_code, gprop_code)
                 
                 if df.empty:
                     self.progress_signal.emit({
                         "Keyword": kw, "Country": self.geo, "Time Period": self.timeframe,
                         "Category": self.category, "Property": self.gprop, "Word Count": len(kw.split()),
                         "Character Count": len(kw), "Total Average": 0, "Trend Slope": 0, "Trending Spike": 0,
-                        "RawData": []
+                        "RawData": [],
+                        "GoogleTrendsUrl": trends_url
                     })
                 else:
-                    values = df[kw].values
-                    total_avg = round(np.mean(values), 2)
+                    if kw not in df.columns:
+                        values = np.array([], dtype=float)
+                        raw_points = []
+                    else:
+                        series = df[kw].astype(float)
+                        values = series.values
+                        raw_points = [
+                            {
+                                "date": point_date.strftime("%Y-%m-%d"),
+                                "value": float(val)
+                            }
+                            for point_date, val in series.items()
+                        ]
+
+                    total_avg = round(np.mean(values), 2) if len(values) > 0 else 0.0
                     
                     x = np.arange(len(values))
                     try:
@@ -82,7 +110,8 @@ class TrendsFetcherWorker(QThread):
                         "Keyword": kw, "Country": self.geo, "Time Period": self.timeframe,
                         "Category": self.category, "Property": self.gprop, "Word Count": len(kw.split()),
                         "Character Count": len(kw), "Total Average": total_avg, "Trend Slope": slope, "Trending Spike": spike,
-                        "RawData": values.astype(float).tolist()
+                        "RawData": raw_points,
+                        "GoogleTrendsUrl": trends_url
                     })
                     
                 idx += 1 
