@@ -1,8 +1,9 @@
 import webbrowser
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
+import numpy as np
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
@@ -34,6 +35,56 @@ try:
 except Exception as _qtwebengine_exc:
     QWebEngineView = None
     _QTWEBENGINE_IMPORT_ERROR = str(_qtwebengine_exc)
+
+
+def build_daily_series(raw_data):
+    day_value_map = {}
+    for point in raw_data or []:
+        point_date = str(point.get("date", "")).strip()
+        point_value = point.get("value")
+        if not point_date or point_value is None:
+            continue
+
+        parsed_date = None
+        try:
+            parsed_date = datetime.strptime(point_date, "%Y-%m-%d")
+        except ValueError:
+            try:
+                parsed_date = datetime.fromisoformat(point_date)
+            except ValueError:
+                parsed_date = None
+
+        if parsed_date is None:
+            continue
+
+        try:
+            day_value_map[parsed_date.date()] = float(point_value)
+        except (TypeError, ValueError):
+            continue
+
+    if not day_value_map:
+        return [], []
+
+    sorted_days = sorted(day_value_map.keys())
+    base_dates = [datetime.combine(day, datetime.min.time()) for day in sorted_days]
+    base_values = np.array([day_value_map[day] for day in sorted_days], dtype=float)
+
+    if len(base_dates) == 1:
+        return base_dates, [float(base_values[0])]
+
+    start_day = sorted_days[0]
+    end_day = sorted_days[-1]
+    day_count = (end_day - start_day).days + 1
+    daily_dates = [
+        datetime.combine(start_day + timedelta(days=idx), datetime.min.time())
+        for idx in range(day_count)
+    ]
+
+    x_known = np.array([dt.toordinal() for dt in base_dates], dtype=float)
+    x_full = np.array([dt.toordinal() for dt in daily_dates], dtype=float)
+    y_full = np.interp(x_full, x_known, base_values)
+
+    return daily_dates, y_full.astype(float).tolist()
 
 
 class TrendChartDialog(QDialog):
@@ -114,29 +165,7 @@ class TrendChartDialog(QDialog):
         layout.addLayout(button_layout)
 
     def _prepare_series(self):
-        dates = []
-        values = []
-        for point in self.raw_data:
-            point_date = str(point.get("date", "")).strip()
-            point_value = point.get("value")
-            if not point_date or point_value is None:
-                continue
-
-            parsed_date = None
-            try:
-                parsed_date = datetime.strptime(point_date, "%Y-%m-%d")
-            except ValueError:
-                try:
-                    parsed_date = datetime.fromisoformat(point_date)
-                except ValueError:
-                    parsed_date = None
-
-            if parsed_date is None:
-                continue
-
-            dates.append(parsed_date)
-            values.append(float(point_value))
-        return dates, values
+        return build_daily_series(self.raw_data)
 
     def _draw_chart(self):
         if self.axis is None or self.canvas is None:
@@ -166,7 +195,10 @@ class TrendChartDialog(QDialog):
                     markeredgewidth=1.4,
                 )
 
-            for x_point, y_point in zip(dates, values):
+            annotate_step = 1 if len(values) <= 60 else max(1, len(values) // 30)
+            for idx, (x_point, y_point) in enumerate(zip(dates, values)):
+                if idx % annotate_step != 0 and idx != len(values) - 1:
+                    continue
                 self.axis.annotate(
                     f"{int(round(y_point))}",
                     xy=(x_point, y_point),
@@ -209,9 +241,23 @@ class TrendChartDialog(QDialog):
         self.axis.tick_params(axis="x", colors="#444444", labelsize=8)
         self.axis.tick_params(axis="y", left=False, labelleft=False)
 
-        date_labels = [dt.strftime("%b %d").replace(" 0", " ") for dt in dates]
-        self.axis.set_xticks(dates)
-        self.axis.set_xticklabels(date_labels, rotation=90, ha="center")
+        if dates:
+            if len(dates) <= 35:
+                tick_step = 1
+            elif len(dates) <= 120:
+                tick_step = 3
+            elif len(dates) <= 370:
+                tick_step = 7
+            else:
+                tick_step = max(1, len(dates) // 24)
+
+            tick_dates = dates[::tick_step]
+            if dates[-1] not in tick_dates:
+                tick_dates.append(dates[-1])
+            tick_labels = [dt.strftime("%b %d").replace(" 0", " ") for dt in tick_dates]
+            self.axis.set_xticks(tick_dates)
+            self.axis.set_xticklabels(tick_labels, rotation=90, ha="center")
+
         self.axis.margins(x=0.01)
 
         if not dates:
@@ -473,15 +519,7 @@ class TrendsTab(QWidget):
 
     @staticmethod
     def _extract_values(raw_data):
-        values = []
-        for point in raw_data or []:
-            value = point.get("value")
-            if value is None:
-                continue
-            try:
-                values.append(float(value))
-            except (TypeError, ValueError):
-                continue
+        _, values = build_daily_series(raw_data)
         return values
 
     def _build_sparkline_pixmap(self, raw_data, width, height):
