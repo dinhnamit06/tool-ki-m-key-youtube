@@ -12,8 +12,126 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QMenu, QCheckBox,
     QDialog, QFileDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont, QColor, QBrush, QAction
+import time, random, traceback
+
+class TrendsFetcherWorker(QThread):
+    progress_signal = pyqtSignal(dict)
+    finished_signal = pyqtSignal()
+    error_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(str)
+    
+    def __init__(self, keywords, geo, timeframe, category, gprop):
+        super().__init__()
+        self.keywords = keywords
+        self.geo = geo
+        self.timeframe = timeframe
+        self.category = category
+        self.gprop = gprop
+        self.is_running = True
+        
+    def run(self):
+        try:
+            from pytrends.request import TrendReq
+        except ImportError:
+            self.error_signal.emit("Dependency Error: 'pytrends' is missing. Run: pip install pytrends")
+            return
+        try:
+            import numpy as np
+        except ImportError:
+            self.error_signal.emit("Dependency Error: 'numpy' is missing. Run: pip install numpy pandas")
+            return
+            
+        pytrends = TrendReq(hl='en-US', tz=360)
+        
+        # Mappings
+        cat_map = {"All Categories": 0, "Arts & Entertainment": 3, "Autos & Vehicles": 47, "Beauty & Fitness": 44, "Games": 8}
+        cat_code = cat_map.get(self.category, 0)
+        
+        prop_map = {"Youtube Search": "youtube", "YouTube Search": "youtube", "Web Search": "", "Image Search": "images", "News Search": "news", "Google Shopping": "froogle"}
+        gprop_code = prop_map.get(self.gprop, "youtube")
+        
+        geo_map = {"Worldwide": "", "United States": "US", "Viet Nam": "VN", "United Kingdom": "GB", "Japan": "JP"}
+        geo_code = geo_map.get(self.geo, "")
+        
+        time_map = {"Past 30 days": "today 1-m", "Past 7 days": "now 7-d", "Past 12 months": "today 12-m", "2004 - present": "all"}
+        tf_code = time_map.get(self.timeframe, "today 1-m")
+
+        idx = 0
+        while idx < len(self.keywords):
+            if not self.is_running:
+                break
+                
+            kw = self.keywords[idx]
+            
+            # Send status safely if the attribute exist
+            if hasattr(self, 'status_signal'):
+                self.status_signal.emit(f"Processing keyword {idx+1}/{len(self.keywords)}: {kw}...")
+                
+            try:
+                pytrends.build_payload([kw], cat=cat_code, timeframe=tf_code, geo=geo_code, gprop=gprop_code)
+                df = pytrends.interest_over_time()
+                
+                if df.empty:
+                    self.progress_signal.emit({
+                        "Keyword": kw, "Country": self.geo, "Time Period": self.timeframe,
+                        "Category": self.category, "Property": self.gprop, "Word Count": len(kw.split()),
+                        "Character Count": len(kw), "Total Average": 0, "Trend Slope": 0, "Trending Spike": 0,
+                        "RawData": []
+                    })
+                else:
+                    values = df[kw].values
+                    total_avg = round(np.mean(values), 2)
+                    
+                    x = np.arange(len(values))
+                    try:
+                        slope = np.polyfit(x, values, 1)[0]
+                        slope = round(slope, 3)
+                    except Exception:
+                        slope = 0.0
+                        
+                    if len(values) >= 30:
+                        last_30_avg = np.mean(values[-30:])
+                        last_7_max = np.max(values[-7:])
+                        spike = round(last_7_max - last_30_avg, 2)
+                    elif len(values) > 0:
+                        last_7_max = np.max(values[-min(7, len(values)):])
+                        spike = round(last_7_max - np.mean(values), 2)
+                    else:
+                        spike = 0.0
+                        
+                    if spike < 0:
+                        spike = 0.0
+                        
+                    self.progress_signal.emit({
+                        "Keyword": kw, "Country": self.geo, "Time Period": self.timeframe,
+                        "Category": self.category, "Property": self.gprop, "Word Count": len(kw.split()),
+                        "Character Count": len(kw), "Total Average": total_avg, "Trend Slope": slope, "Trending Spike": spike,
+                        "RawData": values.astype(float).tolist()
+                    })
+                    
+                idx += 1 # advance to next 
+                
+                # Maximizing speed per user request: no random sleep 8-15
+                if idx < len(self.keywords) and self.is_running:
+                    time.sleep(0.01) # micro sleep just to allow thread switching safely
+                        
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "rate limit" in err_str or "too many requests" in err_str:
+                    wait_time = random.randint(15, 25)
+                    if hasattr(self, 'status_signal'):
+                        self.status_signal.emit(f"Rate limit reached! Waiting {wait_time}s before retrying '{kw}'...")
+                    for _ in range(wait_time * 10):
+                        if not self.is_running:
+                            break
+                        time.sleep(0.1)
+                else:
+                    self.error_signal.emit(f"Error fetching '{kw}': {str(e)}")
+                    idx += 1 # Skip on fatal exception that isn't rate limit
+                
+        self.finished_signal.emit()
 
 class TubeVibeApp(QMainWindow):
     def __init__(self):
@@ -76,21 +194,34 @@ class TubeVibeApp(QMainWindow):
             "Channels", "Video to Text", "Comments"
         ]
         
-        for tab in tabs:
+        self.nav_labels = []
+        for i, tab in enumerate(tabs):
             tab_label = QLabel(tab)
             tab_label.setCursor(Qt.CursorShape.PointingHandCursor)
             if tab == "Keywords":
                 tab_label.setObjectName("active_tab")
             else:
                 tab_label.setObjectName("inactive_tab")
+            tab_label.mousePressEvent = lambda event, idx=i: self.switch_tab(idx)
+            self.nav_labels.append(tab_label)
             navbar_layout.addWidget(tab_label)
             
         navbar_layout.addStretch()
         
-        # 2. Main Content (Keywords Tool)
-        content_area = QWidget()
-        content_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        content_layout = QVBoxLayout(content_area)
+        # Main Stacked Area
+        from PyQt6.QtWidgets import QStackedWidget
+        self.main_stack = QStackedWidget()
+        self.main_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        # TAB 0: Welcome (Placeholder)
+        self.tab_welcome = QWidget()
+        self.main_stack.addWidget(self.tab_welcome)
+        
+        # TAB 1: Main Content (Keywords Tool)
+        self.tab_keywords = QWidget()
+        self.main_stack.addWidget(self.tab_keywords)
+        
+        content_layout = QVBoxLayout(self.tab_keywords)
         content_layout.setContentsMargins(35, 30, 35, 30)
         content_layout.setSpacing(25)
         
@@ -323,8 +454,16 @@ class TubeVibeApp(QMainWindow):
         bottom_layout.addWidget(bottom_right_widget)
         content_layout.addWidget(bottom_toolbar)
         
+        # TAB 2: Trends Tool
+        self.tab_trends = QWidget()
+        self.setup_trends_tab(self.tab_trends)
+        self.main_stack.addWidget(self.tab_trends)
+        
+        # Default to Keywords Tool
+        self.main_stack.setCurrentIndex(1)
+        
         right_layout.addWidget(navbar)
-        right_layout.addWidget(content_area, stretch=1)
+        right_layout.addWidget(self.main_stack, stretch=1)
         main_layout.addWidget(sidebar)
         main_layout.addWidget(right_area, stretch=1)
 
@@ -470,6 +609,309 @@ class TubeVibeApp(QMainWindow):
         clipboard.setText("\n".join(keywords))
         QMessageBox.information(self, "Copied", f"Successfully copied {len(keywords)} keywords to clipboard!")
         
+    def switch_tab(self, index):
+        self.main_stack.setCurrentIndex(index)
+        for i, lbl in enumerate(self.nav_labels):
+            if i == index:
+                lbl.setObjectName("active_tab")
+                lbl.setStyleSheet("color: #ffffff; background-color: #2a2a2a; padding: 20px 15px; border-bottom: 3px solid #e50914; font-weight: bold; font-size: 15px;")
+            else:
+                lbl.setObjectName("inactive_tab")
+                lbl.setStyleSheet("color: #aaaaaa; padding: 20px 15px; font-size: 15px; border-bottom: none; background-color: transparent;")
+
+    def setup_trends_tab(self, tab):
+        from PyQt6.QtWidgets import QTextEdit, QSplitter
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(35, 30, 35, 30)
+        layout.setSpacing(20)
+        
+        header_label = QLabel("Trends Tool")
+        header_label.setObjectName("header_label")
+        header_label.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        layout.addWidget(header_label)
+
+        from PyQt6.QtWidgets import QFormLayout
+        
+        # --- TRENDS TOP ACTION BAR ---
+        top_bar = QFrame()
+        top_bar.setStyleSheet("background-color: transparent;")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.btn_trends_go = QPushButton("Go")
+        self.btn_trends_go.setFixedSize(120, 28)
+        self.btn_trends_go.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
+        self.btn_trends_go.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_trends_go.clicked.connect(self.start_trends_fetch)
+        
+        self.btn_trends_stop = QPushButton("Stop")
+        self.btn_trends_stop.setFixedSize(120, 28)
+        self.btn_trends_stop.setStyleSheet("background-color: #444444; color: white; border: none; font-weight: bold; border-radius: 4px;")
+        self.btn_trends_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_trends_stop.clicked.connect(self.stop_trends_fetch)
+        self.btn_trends_stop.hide()
+        
+        self.btn_trends_settings = QPushButton("Settings")
+        self.btn_trends_settings.setFixedSize(100, 28)
+        self.btn_trends_settings.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
+        self.btn_trends_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        self.btn_trends_browser = QPushButton("Browser")
+        self.btn_trends_browser.setFixedSize(100, 28)
+        self.btn_trends_browser.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
+        self.btn_trends_browser.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        top_layout.addWidget(self.btn_trends_go)
+        top_layout.addWidget(self.btn_trends_stop)
+        top_layout.addSpacing(140)
+        top_layout.addWidget(self.btn_trends_settings)
+        top_layout.addStretch()
+        top_layout.addWidget(self.btn_trends_browser)
+        
+        layout.addWidget(top_bar)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # --- LEFT SIDEBAR ---
+        left_panel = QFrame()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 5, 10, 0)
+        left_layout.setSpacing(12)
+        left_panel.setStyleSheet("background-color: transparent;")
+        
+        # Form Layout for Dropdowns
+        form_layout = QFormLayout()
+        form_layout.setContentsMargins(0,0,0,0)
+        form_layout.setSpacing(8)
+        
+        combo_style = "background-color: #ffffff; color: #000000; padding: 4px; border: 1px solid #cccccc; border-radius: 2px; font-size: 12px; min-width: 140px;"
+        label_style = "color: #f1f1f1; font-size: 13px;"
+        
+        self.t_combo_country = QComboBox()
+        self.t_combo_country.addItems(["Worldwide", "United States", "Viet Nam", "United Kingdom", "Japan"])
+        self.t_combo_country.setStyleSheet(combo_style)
+        lbl_country = QLabel("Country:")
+        lbl_country.setStyleSheet(label_style)
+        form_layout.addRow(lbl_country, self.t_combo_country)
+        
+        self.t_combo_period = QComboBox()
+        self.t_combo_period.addItems(["Past 30 days", "Past 7 days", "Past 12 months", "2004 - present"])
+        self.t_combo_period.setStyleSheet(combo_style)
+        lbl_period = QLabel("Time Period:")
+        lbl_period.setStyleSheet(label_style)
+        form_layout.addRow(lbl_period, self.t_combo_period)
+        
+        self.t_combo_cat = QComboBox()
+        self.t_combo_cat.addItems(["All Categories", "Arts & Entertainment", "Autos & Vehicles", "Beauty & Fitness", "Games"])
+        self.t_combo_cat.setStyleSheet(combo_style)
+        lbl_cat = QLabel("Category:")
+        lbl_cat.setStyleSheet(label_style)
+        form_layout.addRow(lbl_cat, self.t_combo_cat)
+        
+        self.t_combo_prop = QComboBox()
+        self.t_combo_prop.addItems(["Youtube Search", "Web Search", "Image Search", "News Search", "Google Shopping"])
+        self.t_combo_prop.setStyleSheet(combo_style)
+        lbl_prop = QLabel("Property:")
+        lbl_prop.setStyleSheet(label_style)
+        form_layout.addRow(lbl_prop, self.t_combo_prop)
+        
+        left_layout.addLayout(form_layout)
+        
+        kw_label = QLabel("Enter one keyword per line:")
+        kw_label.setStyleSheet("color: #bbbbbb; font-size: 12px; margin-top: 10px;")
+        left_layout.addWidget(kw_label)
+        
+        self.trends_input = QTextEdit()
+        self.trends_input.setStyleSheet("background-color: #ffffff; color: #000000; border: 1px solid #aaa; border-radius: 2px;")
+        self.trends_input.setText("diy crafts\ndiy wall decor\ndiy videos\ndiy yarn\ndiy upholstered headboard\ndiy zipline\ndiy tiktok\ndiy aquarium")
+        left_layout.addWidget(self.trends_input, stretch=1)
+        
+        # --- RIGHT AREA (TABLE) ---
+        self.trends_table = QTableWidget()
+        self.trends_table.setColumnCount(12)
+        
+        headers = ["✔", "Chart", "🔍 Keyword", "🔍 Country", "🔍 Time Period", "🔍 Category", "🔍 Property", "🔍 Word Count", "🔍 Character Count", "🔍 Total Average", "🔍 Trend Slope", "🔍 Trending Spike"]
+        self.trends_table.setHorizontalHeaderLabels(headers)
+        
+        self.trends_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.trends_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Keyword column stretches
+        self.trends_table.setColumnWidth(0, 30) # Checkbox column
+        self.trends_table.setColumnWidth(1, 40) # Chart column
+        self.trends_table.verticalHeader().setVisible(False)
+        self.trends_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.trends_table.setAlternatingRowColors(False)
+        self.trends_table.setStyleSheet("""
+            QTableWidget { background-color: #ffffff; color: #000000; gridline-color: #dddddd; border: 1px solid #cccccc; }
+            QHeaderView::section { background-color: #f0f0f0; color: #000000; font-weight: bold; border: 1px solid #cccccc; padding: 4px; }
+        """)
+        
+        splitter.addWidget(left_panel)
+        splitter.addWidget(self.trends_table)
+        splitter.setSizes([260, 800])
+        
+        layout.addWidget(splitter, stretch=1)
+        
+        # --- BOTTOM TOOLBAR ---
+        bottom_toolbar = QFrame()
+        bottom_toolbar.setStyleSheet("background-color: transparent;")
+        b_layout = QHBoxLayout(bottom_toolbar)
+        b_layout.setContentsMargins(0, 5, 0, 0)
+        
+        self.t_btn_vol = QPushButton("Volume Data")
+        self.t_btn_hash = QPushButton("Hashtags")
+        
+        self.t_status = QLabel("Total Items: 0")
+        self.t_status.setStyleSheet("color: #bbbbbb; font-weight: bold; font-size: 11px;")
+        
+        self.t_btn_file = QPushButton("File")
+        self.t_btn_clear = QPushButton("Clear")
+        
+        for btn in [self.t_btn_vol, self.t_btn_hash, self.t_btn_file, self.t_btn_clear]:
+            btn.setStyleSheet("background-color: #e50914; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; padding: 7px 18px;")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+        self.t_btn_clear.clicked.connect(lambda: self.trends_table.setRowCount(0))
+            
+        b_layout.addWidget(self.t_btn_vol)
+        b_layout.addWidget(self.t_btn_hash)
+        b_layout.addStretch()
+        b_layout.addWidget(self.t_status)
+        b_layout.addStretch()
+        b_layout.addWidget(self.t_btn_file)
+        b_layout.addWidget(self.t_btn_clear)
+        
+        layout.addWidget(bottom_toolbar)
+
+    def start_trends_fetch(self):
+        text = self.trends_input.toPlainText()
+        keywords = [line.strip() for line in text.split("\n") if line.strip()]
+        
+        if not keywords:
+            QMessageBox.warning(self, "No Keywords", "Please enter at least one keyword in the side panel.")
+            return
+            
+        self.trends_table.setRowCount(0)
+        self.trends_table.setSortingEnabled(False)
+        self.btn_trends_go.hide()
+        self.btn_trends_stop.show()
+        self.t_status.setText("Total Items: 0")
+        
+        geo = self.t_combo_country.currentText()
+        timeframe = self.t_combo_period.currentText()
+        category = self.t_combo_cat.currentText()
+        gprop = self.t_combo_prop.currentText()
+        
+        self.trends_worker = TrendsFetcherWorker(keywords, geo, timeframe, category, gprop)
+        self.trends_worker.progress_signal.connect(self.on_trends_progress)
+        self.trends_worker.finished_signal.connect(self.on_trends_finished)
+        self.trends_worker.error_signal.connect(self.on_trends_error)
+        self.trends_worker.status_signal.connect(self.on_trends_status)
+        self.trends_worker.start()
+
+    def stop_trends_fetch(self):
+        if hasattr(self, 'trends_worker') and self.trends_worker.isRunning():
+            self.trends_worker.is_running = False
+            self.btn_trends_stop.setText("Stopping...")
+
+    def on_trends_status(self, msg):
+        self.t_status.setText(msg)
+
+    def on_trends_progress(self, data):
+        row = self.trends_table.rowCount()
+        self.trends_table.insertRow(row)
+        
+        check_item = QTableWidgetItem()
+        check_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        check_item.setCheckState(Qt.CheckState.Unchecked)
+        self.trends_table.setItem(row, 0, check_item)
+        
+        chart_item = QTableWidgetItem("📈")
+        chart_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if data.get("RawData"):
+            chart_item.setData(Qt.ItemDataRole.UserRole, data["RawData"])
+        self.trends_table.setItem(row, 1, chart_item)
+        self.trends_table.setItem(row, 2, QTableWidgetItem(str(data["Keyword"])))
+        self.trends_table.setItem(row, 3, QTableWidgetItem(str(data["Country"])))
+        self.trends_table.setItem(row, 4, QTableWidgetItem(str(data["Time Period"])))
+        self.trends_table.setItem(row, 5, QTableWidgetItem(str(data["Category"])))
+        self.trends_table.setItem(row, 6, QTableWidgetItem(str(data["Property"])))
+        
+        wc_item = QTableWidgetItem()
+        wc_item.setData(Qt.ItemDataRole.DisplayRole, int(data["Word Count"]))
+        self.trends_table.setItem(row, 7, wc_item)
+        
+        cc_item = QTableWidgetItem()
+        cc_item.setData(Qt.ItemDataRole.DisplayRole, int(data["Character Count"]))
+        self.trends_table.setItem(row, 8, cc_item)
+        
+        tc_item = QTableWidgetItem()
+        tc_item.setData(Qt.ItemDataRole.DisplayRole, float(data["Total Average"]))
+        self.trends_table.setItem(row, 9, tc_item)
+        
+        ts_item = QTableWidgetItem()
+        ts_item.setData(Qt.ItemDataRole.DisplayRole, float(data["Trend Slope"]))
+        self.trends_table.setItem(row, 10, ts_item)
+        
+        spike_item = QTableWidgetItem()
+        spike_item.setData(Qt.ItemDataRole.DisplayRole, float(data["Trending Spike"]))
+        self.trends_table.setItem(row, 11, spike_item)
+        
+        self.t_status.setText(f"Total Items: {self.trends_table.rowCount()}")
+
+    def on_trends_finished(self):
+        self.btn_trends_stop.hide()
+        self.btn_trends_stop.setText("Stop")
+        self.btn_trends_go.show()
+        
+        self.trends_table.setSortingEnabled(True)
+        self.trends_table.sortItems(9, Qt.SortOrder.DescendingOrder)
+        self.t_status.setText(f"Total Items: {self.trends_table.rowCount()} (Sorted by Average)")
+        
+        QMessageBox.information(self, "Finished", "Trends data fetching is complete!")
+
+    def show_trend_chart(self, item):
+        if item.column() != 1:  # Chart col
+            return
+            
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            QMessageBox.information(self, "No Chart Data", "No timeline metrics are available for this keyword.")
+            return
+            
+        keyword = self.trends_table.item(item.row(), 2).text()
+        
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Searches Over Time: {keyword}")
+            dialog.resize(600, 400)
+            
+            layout = QVBoxLayout(dialog)
+            
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(data, color='#e50914', linewidth=2, marker='o', markersize=4)
+            ax.set_title(f"Interest Over Time - {keyword}", fontsize=14, pad=10)
+            ax.set_ylabel("Interest Level (0-100)", fontsize=11)
+            ax.set_xlabel("Time Horizon", fontsize=11)
+            ax.grid(True, linestyle='--', alpha=0.6)
+            
+            canvas = FigureCanvas(fig)
+            layout.addWidget(canvas)
+            
+            dialog.exec()
+            plt.close(fig) # prevent memory leaks
+        except ImportError:
+            QMessageBox.warning(self, "Missing Module", "Please install Matplotlib to view charts.\nRun: pip install matplotlib")
+
+    def on_trends_error(self, err_msg):
+        self.btn_trends_stop.hide()
+        self.btn_trends_stop.setText("Stop")
+        self.btn_trends_go.show()
+        QMessageBox.critical(self, "Error", err_msg)
+
     def send_to_trends(self, selected_only):
         keywords = []
         for row in range(self.table.rowCount()):
@@ -488,12 +930,15 @@ class TubeVibeApp(QMainWindow):
             QMessageBox.warning(self, "No Keywords", msg)
             return
             
-        # Store securely inside application memory for cross-tab sharing
-        self.trends_transfer_payload = keywords
-        print(f"[INTERNAL] Send Transfer Payload (length {len(keywords)}):", keywords[:5], "...")
+        # Overwrite the Trends tab text box completely (so user immediately sees it without scrolling past old mock data)
+        new_text = "\n".join(keywords)
+        self.trends_input.setText(new_text)
+            
+        # Switch tab automatically: Trends Tool is index 2
+        self.switch_tab(2)
         
-        prefix = "SELECTED" if selected_only else "ALL"
-        QMessageBox.information(self, "Transit Success", f"Successfully sent {len(keywords)} {prefix} keywords to Trends tool.")
+        # Use proper QMainWindow statusBar logic
+        self.statusBar().showMessage(f"Sent {len(keywords)} keywords to Trends tool.", 4000)
 
     def web_search(self, engine, keyword):
         import webbrowser
@@ -610,7 +1055,7 @@ Seed keyword: {seed_text}
 """
         
         # Gemini API Config
-        api_key = "AIzaSyBdQaRivbh1ptEmE2BkEZopw50dSDbpZDs"
+        api_key = "AIzaSyDX6QyjGovw_42klLrTLe2tfWg10B283jI"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
         headers = {
             "Content-Type": "application/json"
@@ -836,29 +1281,6 @@ Seed keyword: {seed_text}
     def open_import_volume_dialog(self):
         diag = ImportVolumeDialog(self)
         diag.exec()
-
-    def send_to_trends(self, selected_only=False):
-        keywords = []
-        for row in range(self.table.rowCount()):
-            if selected_only:
-                chk_item = self.table.item(row, 0)
-                if not (chk_item and chk_item.checkState() == Qt.CheckState.Checked):
-                    continue
-            kw_item = self.table.item(row, 5) # Keyword is at col 5
-            if kw_item:
-                keywords.append(kw_item.text().strip())
-                
-        if not keywords:
-            QMessageBox.warning(self, "No Keywords", "No keywords were found to send.")
-            return
-            
-        self.sent_to_trends = keywords
-        print(f"--- SENT {len(keywords)} KEYWORDS TO TRENDS ---")
-        for kw in keywords:
-            print(kw)
-            
-        action_type = "selected" if selected_only else "all"
-        QMessageBox.information(self, "Trends Data Sent", f"Sent {action_type} {len(keywords)} keywords to Trends tool")
 
     def send_to_video(self):
         self._send_to_tool("video")
