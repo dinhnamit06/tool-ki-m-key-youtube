@@ -485,6 +485,8 @@ class TrendsTab(QWidget):
         self._browser_wait_min_seconds = 4.5
         self._browser_wait_max_seconds = 6.5
         self._pending_input_keywords = []
+        self._chart_header_checked = False
+        self._chart_check_syncing = False
         self._browser_wait_timer = QTimer(self)
         self._browser_wait_timer.setSingleShot(True)
         self._browser_wait_timer.timeout.connect(self._load_next_browser_keyword)
@@ -610,6 +612,7 @@ class TrendsTab(QWidget):
             "Trending Spike",
         ]
         self.trends_table.setHorizontalHeaderLabels(headers)
+        self._update_chart_header_label()
         self._setup_trends_table_columns()
         self.trends_table.verticalHeader().setDefaultSectionSize(36)
         self.trends_table.verticalHeader().setVisible(False)
@@ -617,6 +620,8 @@ class TrendsTab(QWidget):
         self.trends_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.trends_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.trends_table.customContextMenuRequested.connect(self.show_trends_context_menu)
+        self.trends_table.horizontalHeader().sectionClicked.connect(self._on_trends_header_clicked)
+        self.trends_table.itemChanged.connect(self._on_trends_item_changed)
         self.trends_table.setStyleSheet(
             "QTableWidget { background-color: #ffffff; color: #000000; gridline-color: #dddddd; border: 1px solid #cccccc; } "
             "QHeaderView::section { background-color: #f0f0f0; color: #000000; font-weight: bold; border: 1px solid #cccccc; padding: 4px; }"
@@ -672,6 +677,8 @@ class TrendsTab(QWidget):
     def clear_trends_table(self):
         self.trends_table.setRowCount(0)
         self._sparkline_cache.clear()
+        self._chart_header_checked = False
+        self._update_chart_header_label()
         self._apply_trends_table_column_widths()
         self._worker_status_text = ""
         self._pending_input_keywords = []
@@ -709,6 +716,67 @@ class TrendsTab(QWidget):
             10: (100, 145) # Trending Spike
         }
         self._apply_trends_table_column_widths()
+
+    def _update_chart_header_label(self):
+        header_item = self.trends_table.horizontalHeaderItem(0)
+        if header_item is None:
+            header_item = QTableWidgetItem()
+            self.trends_table.setHorizontalHeaderItem(0, header_item)
+        header_item.setText("[x] Chart" if self._chart_header_checked else "[ ] Chart")
+
+    def _set_all_chart_checkboxes(self, checked):
+        self._chart_check_syncing = True
+        self.trends_table.blockSignals(True)
+        try:
+            target_state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            for row in range(self.trends_table.rowCount()):
+                item = self.trends_table.item(row, 0)
+                if item is None:
+                    continue
+                item.setFlags(
+                    item.flags()
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsEnabled
+                )
+                item.setCheckState(target_state)
+        finally:
+            self.trends_table.blockSignals(False)
+            self._chart_check_syncing = False
+
+        self._chart_header_checked = bool(checked)
+        self._update_chart_header_label()
+
+    def _refresh_chart_header_checked_state(self):
+        row_count = self.trends_table.rowCount()
+        if row_count <= 0:
+            self._chart_header_checked = False
+            self._update_chart_header_label()
+            return
+
+        all_checked = True
+        for row in range(row_count):
+            item = self.trends_table.item(row, 0)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                all_checked = False
+                break
+
+        self._chart_header_checked = all_checked
+        self._update_chart_header_label()
+
+    def _on_trends_header_clicked(self, column):
+        if column != 0:
+            return
+        if self.trends_table.rowCount() <= 0:
+            return
+        self._set_all_chart_checkboxes(not self._chart_header_checked)
+
+    def _on_trends_item_changed(self, item):
+        if self._chart_check_syncing:
+            return
+        if item is None or item.column() != 0:
+            return
+        self._refresh_chart_header_checked_state()
 
     def _apply_trends_table_column_widths(self):
         old_chart_width = self.trends_table.columnWidth(0)
@@ -978,6 +1046,8 @@ class TrendsTab(QWidget):
         if clear_table:
             self.trends_table.setRowCount(0)
             self._sparkline_cache.clear()
+            self._chart_header_checked = False
+            self._update_chart_header_label()
         self._set_worker_status("Starting trends fetch...")
         self.trends_table.setSortingEnabled(False)
         self._set_fetch_buttons_running(True)
@@ -1114,6 +1184,7 @@ class TrendsTab(QWidget):
         self._refresh_status_label()
         self.trends_table.viewport().update()
         QApplication.processEvents()
+        self._refresh_chart_header_checked_state()
 
     def on_trends_finished(self):
         if not self._browser_sequence_active:
@@ -1336,6 +1407,7 @@ class TrendsTab(QWidget):
         for row in reversed(rows):
             self.trends_table.removeRow(row)
         self._refresh_sparklines()
+        self._refresh_chart_header_checked_state()
         self._refresh_status_label()
         self._show_status_message(f"Deleted {len(rows)} row(s).")
 
@@ -1365,6 +1437,7 @@ class TrendsTab(QWidget):
             )
             item.setCheckState(new_state)
 
+        self._refresh_chart_header_checked_state()
         state_text = "Checked" if new_state == Qt.CheckState.Checked else "Unchecked"
         self._show_status_message(f"{state_text} {len(rows)} row(s).")
 

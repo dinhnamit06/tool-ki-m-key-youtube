@@ -46,6 +46,13 @@ class TrendsFetcherWorker(QThread):
         self._thread_local = threading.local()
         self.total_requests_made = 0
         self._recent_request_seconds = []
+        self._delay_min_seconds = 2.0
+        self._delay_max_seconds = 3.4
+        self._burst_keywords = 3
+        self._burst_delay_min = 0.9
+        self._burst_delay_max = 1.6
+        self._slow_request_threshold_seconds = 8.0
+        self._rate_limit_events = 0
 
     @staticmethod
     def _build_google_trends_url(keyword, timeframe, geo, gprop):
@@ -70,6 +77,40 @@ class TrendsFetcherWorker(QThread):
         self._recent_request_seconds.append(float(seconds))
         if len(self._recent_request_seconds) > 12:
             self._recent_request_seconds.pop(0)
+
+    def _clamp(self, value, min_value, max_value):
+        return max(min_value, min(max_value, value))
+
+    def _recent_average_request_seconds(self, window=5):
+        if not self._recent_request_seconds:
+            return 0.0
+        points = self._recent_request_seconds[-window:]
+        return float(sum(points)) / float(len(points))
+
+    def _update_dynamic_delay(self, last_request_seconds, rate_limited=False):
+        avg_recent = self._recent_average_request_seconds(window=5)
+
+        if rate_limited:
+            self._delay_min_seconds = self._clamp(self._delay_min_seconds + 0.7, 1.2, 6.5)
+            self._delay_max_seconds = self._clamp(self._delay_max_seconds + 1.0, 2.0, 8.5)
+            return
+
+        if last_request_seconds >= self._slow_request_threshold_seconds or avg_recent >= 7.0:
+            self._delay_min_seconds = self._clamp(self._delay_min_seconds + 0.35, 1.2, 6.5)
+            self._delay_max_seconds = self._clamp(self._delay_max_seconds + 0.5, 2.0, 8.5)
+            return
+
+        if last_request_seconds <= 3.0 and avg_recent <= 4.0:
+            self._delay_min_seconds = self._clamp(self._delay_min_seconds - 0.15, 1.2, 6.5)
+            self._delay_max_seconds = self._clamp(self._delay_max_seconds - 0.2, 2.0, 8.5)
+
+    def _next_inter_keyword_delay(self, keyword_index):
+        if keyword_index <= self._burst_keywords:
+            return random.uniform(self._burst_delay_min, self._burst_delay_max)
+
+        lo = min(self._delay_min_seconds, self._delay_max_seconds - 0.2)
+        hi = max(lo + 0.2, self._delay_max_seconds)
+        return random.uniform(lo, hi)
 
     def _format_waiting_status(self, keyword, index, total, remaining_seconds, suffix=""):
         message = f"Processing '{keyword}' ({index}/{total}) \u2022 Waiting {remaining_seconds}s..."
@@ -181,6 +222,8 @@ class TrendsFetcherWorker(QThread):
             )
 
             keyword_success = False
+            keyword_rate_limited = False
+            latest_request_seconds = 0.0
 
             for attempt in range(1, 4):
                 if not self.is_running or keyword_success:
@@ -192,9 +235,11 @@ class TrendsFetcherWorker(QThread):
                     duration_seconds = time.time() - start_ts
                     self.total_requests_made += 1
                     self._record_request_time(duration_seconds)
+                    latest_request_seconds = duration_seconds
 
                     successful_keywords += 1
                     keyword_success = True
+                    self._update_dynamic_delay(duration_seconds, rate_limited=False)
 
                     payload["ProcessedIndex"] = successful_keywords
                     payload["TotalKeywords"] = total_keywords
@@ -205,9 +250,13 @@ class TrendsFetcherWorker(QThread):
                     duration_seconds = time.time() - start_ts
                     self.total_requests_made += 1
                     self._record_request_time(duration_seconds)
+                    latest_request_seconds = duration_seconds
                     err_text = str(exc)
 
                     if self._is_rate_limit_error(err_text):
+                        keyword_rate_limited = True
+                        self._rate_limit_events += 1
+                        self._update_dynamic_delay(duration_seconds, rate_limited=True)
                         if attempt == 1:
                             wait_seconds = random.uniform(20.0, 35.0)
                             self._sleep_with_status(
@@ -236,8 +285,12 @@ class TrendsFetcherWorker(QThread):
                     break
 
             if self.is_running and keyword_index < total_keywords:
-                inter_delay = random.uniform(3.0, 5.5)
-                self._sleep_with_status(inter_delay, kw, keyword_index, total_keywords)
+                inter_delay = self._next_inter_keyword_delay(keyword_index)
+                if keyword_rate_limited:
+                    inter_delay += random.uniform(0.6, 1.4)
+                if latest_request_seconds >= self._slow_request_threshold_seconds:
+                    inter_delay += random.uniform(0.4, 1.0)
+                self._sleep_with_status(inter_delay, kw, keyword_index, total_keywords, suffix="(adaptive delay)")
 
             self.status_signal.emit(
                 f"Processed {keyword_index}/{total_keywords} keyword(s) \u2022 Added {successful_keywords} row(s)"
