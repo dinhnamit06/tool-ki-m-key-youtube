@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, 
     QPushButton, QFrame, QSizePolicy, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QMessageBox, QMenu, QCheckBox, QApplication
+    QHeaderView, QMessageBox, QMenu, QCheckBox, QApplication, QSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect
 from PyQt6.QtGui import QFont, QColor, QBrush, QAction
@@ -95,6 +95,46 @@ class KeywordsTab(QWidget):
         
         range_layout.addWidget(range_label)
         range_layout.addWidget(self.range_combo)
+
+        # --- Count Section ---
+        count_layout = QVBoxLayout()
+        count_layout.setSpacing(8)
+
+        count_label = QLabel("Keyword count:")
+        count_label.setObjectName("input_label")
+        self.count_spin = QSpinBox()
+        self.count_spin.setRange(10, 500)
+        self.count_spin.setSingleStep(10)
+        self.count_spin.setValue(10)
+        self.count_spin.setMinimumHeight(42)
+        self.count_spin.setMinimumWidth(130)
+        self.count_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.count_spin.setStyleSheet("""
+            QSpinBox {
+                background-color: #2b2b2b;
+                border: 1px solid #444444;
+                padding: 8px 12px;
+                border-radius: 5px;
+                color: #ffffff;
+                font-size: 14px;
+            }
+            QSpinBox:focus {
+                border: 2px solid #e50914;
+                background-color: #333333;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 18px;
+                border: none;
+                background: transparent;
+            }
+            QSpinBox::up-arrow, QSpinBox::down-arrow {
+                width: 8px;
+                height: 8px;
+            }
+        """)
+
+        count_layout.addWidget(count_label)
+        count_layout.addWidget(self.count_spin)
         
         # --- Generate Button ---
         self.generate_btn = QPushButton("✓ Generate")
@@ -108,6 +148,7 @@ class KeywordsTab(QWidget):
         input_row_layout.addLayout(seed_layout)
         input_row_layout.addLayout(country_layout)
         input_row_layout.addLayout(range_layout)
+        input_row_layout.addLayout(count_layout)
         input_row_layout.addWidget(self.generate_btn, alignment=Qt.AlignmentFlag.AlignBottom)
         
         content_layout.addWidget(input_frame)
@@ -250,6 +291,7 @@ class KeywordsTab(QWidget):
 
         seed_text = self.seed_input.text().strip()
         target_country = self.country_combo.currentText()
+        target_count = int(self.count_spin.value())
         if not seed_text:
             QMessageBox.warning(self, "Empty Input", "Please enter a seed keyword first.")
             return
@@ -260,7 +302,7 @@ class KeywordsTab(QWidget):
         
         prompt = f"""You are an expert YouTube keyword researcher.
 Given the seed keyword: "{seed_text}"
-Generate 100 high-quality, natural long-tail keywords for YouTube videos.
+Generate exactly {target_count} high-quality, natural long-tail keywords for YouTube videos.
 Important rules:
 - Each keyword must be short and concise: maximum 5 words.
 - Focus on trending, searchable YouTube video topics and sub-niches.
@@ -275,7 +317,7 @@ Important rules:
             
         prompt += f"""- Avoid long sentences or keywords longer than 5 words.
 - Support wildcard * if present.
-- Return ONLY a clean comma-separated list of keywords. No numbers, no explanations, no extra text.
+- Return ONLY a clean comma-separated list of exactly {target_count} keywords. No numbers, no explanations, no extra text.
 Seed keyword: {seed_text}
 """
         try:
@@ -295,6 +337,8 @@ Seed keyword: {seed_text}
         seen = set()
         rank = 1
         for keyword in generated_list:
+            if len(results) >= target_count:
+                break
             keyword = " ".join(keyword.split())
             if keyword.lower() not in seen:
                 seen.add(keyword.lower())

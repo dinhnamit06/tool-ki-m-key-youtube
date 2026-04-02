@@ -6,13 +6,6 @@ try:
 except ImportError:
     REQUESTS_INSTALLED = False
 
-# Gemini API Config
-GEMINI_API_KEY = "AIzaSyDX6QyjGovw_42klLrTLe2tfWg10B283jI"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-GEMINI_HEADERS = {
-    "Content-Type": "application/json"
-}
-
 # Trends Mappings
 CAT_MAP = {
     "All Categories": 0, 

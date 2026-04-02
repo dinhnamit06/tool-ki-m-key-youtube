@@ -1,4 +1,5 @@
-from utils.constants import GEMINI_URL, GEMINI_HEADERS, REQUESTS_INSTALLED
+from utils.config import GEMINI_URL, GEMINI_HEADERS, ensure_gemini_api_key
+from utils.constants import REQUESTS_INSTALLED
 try:
     import requests
 except ImportError:
@@ -10,6 +11,7 @@ def generate_keywords_api(prompt):
     """
     if not REQUESTS_INSTALLED:
         raise ImportError("The 'requests' module is missing.")
+    ensure_gemini_api_key()
 
     data = {
         "contents": [{

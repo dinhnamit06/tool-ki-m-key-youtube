@@ -7,6 +7,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -24,6 +25,8 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QWidget,
     QCheckBox,
+    QMenu,
+    QSpinBox,
 )
 
 from core.trends_fetcher import TrendsFetcherWorker
@@ -88,11 +91,12 @@ def build_daily_series(raw_data):
 
 
 class TrendChartDialog(QDialog):
-    def __init__(self, keyword, raw_data, google_trends_url, parent=None):
+    def __init__(self, keyword, raw_data, google_trends_url, dark_theme=True, parent=None):
         super().__init__(parent)
         self.keyword = keyword
         self.raw_data = raw_data or []
         self.google_trends_url = google_trends_url
+        self.dark_theme = bool(dark_theme)
         self.figure = None
         self.axis = None
         self.canvas = None
@@ -100,22 +104,40 @@ class TrendChartDialog(QDialog):
         self.setWindowTitle(f"Searches Over Time - {self.keyword}")
         self.setModal(True)
         self.resize(920, 560)
-        self.setStyleSheet(
-            """
-            QDialog { background-color: #f2f2f2; color: #222222; }
-            QPushButton {
-                background-color: #e50914;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-weight: 600;
-                padding: 4px 12px;
-            }
-            QPushButton:hover { background-color: #ff1a25; }
-            QPushButton:disabled { background-color: #5a5a5a; color: #cccccc; }
-            QCheckBox { color: #222222; font-weight: 600; }
-            """
-        )
+        if self.dark_theme:
+            self.setStyleSheet(
+                """
+                QDialog { background-color: #121212; color: #f2f2f2; }
+                QPushButton {
+                    background-color: #e50914;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    font-weight: 600;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #ff1a25; }
+                QPushButton:disabled { background-color: #5a5a5a; color: #cccccc; }
+                QCheckBox { color: #f2f2f2; font-weight: 600; }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QDialog { background-color: #f2f2f2; color: #222222; }
+                QPushButton {
+                    background-color: #e50914;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    font-weight: 600;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #ff1a25; }
+                QPushButton:disabled { background-color: #5a5a5a; color: #cccccc; }
+                QCheckBox { color: #222222; font-weight: 600; }
+                """
+            )
 
         self._build_ui()
         self._draw_chart()
@@ -176,8 +198,33 @@ class TrendChartDialog(QDialog):
         dates, values = self._prepare_series()
         self.axis.clear()
 
-        self.figure.patch.set_facecolor("#ffffff")
-        self.axis.set_facecolor("#ffffff")
+        if self.dark_theme:
+            fig_bg = "#121212"
+            axis_bg = "#1a1a1a"
+            line_color = "#ff3b3b"
+            marker_face = "#ff4a4a"
+            marker_edge = "#b71c1c"
+            annotation_color = "#f3f3f3"
+            title_color = "#f2f2f2"
+            x_label_color = "#d4d4d4"
+            axis_edge = "#4a4a4a"
+            empty_color = "#bcbcbc"
+            tick_color = "#d0d0d0"
+        else:
+            fig_bg = "#ffffff"
+            axis_bg = "#ffffff"
+            line_color = "#c5302c"
+            marker_face = "#f44336"
+            marker_edge = "#b71c1c"
+            annotation_color = "#303030"
+            title_color = "#222222"
+            x_label_color = "#333333"
+            axis_edge = "#c8c8c8"
+            empty_color = "#555555"
+            tick_color = "#444444"
+
+        self.figure.patch.set_facecolor(fig_bg)
+        self.axis.set_facecolor(axis_bg)
 
         if dates and values:
             if self.chk_bar_chart.isChecked():
@@ -186,12 +233,12 @@ class TrendChartDialog(QDialog):
                 self.axis.plot(
                     dates,
                     values,
-                    color="#c5302c",
+                    color=line_color,
                     linewidth=2.0,
                     marker="o",
                     markersize=7,
-                    markerfacecolor="#f44336",
-                    markeredgecolor="#b71c1c",
+                    markerfacecolor=marker_face,
+                    markeredgecolor=marker_edge,
                     markeredgewidth=1.4,
                 )
 
@@ -207,7 +254,7 @@ class TrendChartDialog(QDialog):
                     ha="center",
                     va="bottom",
                     fontsize=8.5,
-                    color="#303030",
+                    color=annotation_color,
                     fontweight="semibold",
                 )
         else:
@@ -218,27 +265,27 @@ class TrendChartDialog(QDialog):
                 transform=self.axis.transAxes,
                 ha="center",
                 va="center",
-                color="#555555",
+                color=empty_color,
             )
 
         self.axis.set_title(
             f"Worldwide Search Trends Over Time for {self.keyword}",
-            color="#222222",
+            color=title_color,
             pad=10,
             fontsize=11,
             fontweight="semibold",
         )
-        self.axis.set_xlabel("Date", color="#333333", labelpad=10)
+        self.axis.set_xlabel("Date", color=x_label_color, labelpad=10)
         self.axis.set_ylabel("")
         self.axis.set_ylim(0, 100)
         self.axis.grid(False)
 
         for spine in self.axis.spines.values():
-            spine.set_color("#c8c8c8")
+            spine.set_color(axis_edge)
         self.axis.spines["top"].set_visible(False)
         self.axis.spines["right"].set_visible(False)
         self.axis.spines["left"].set_visible(False)
-        self.axis.tick_params(axis="x", colors="#444444", labelsize=8)
+        self.axis.tick_params(axis="x", colors=tick_color, labelsize=8)
         self.axis.tick_params(axis="y", left=False, labelleft=False)
 
         if dates:
@@ -292,11 +339,134 @@ class TrendChartDialog(QDialog):
             QMessageBox.warning(self, "Save Error", f"Failed to save chart: {exc}")
 
 
+class TrendsSettingsDialog(QDialog):
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Trends Tool Settings")
+        self.setModal(True)
+        self.resize(560, 310)
+        self.setStyleSheet(
+            """
+            QDialog { background-color: #1c1c1c; color: #f2f2f2; }
+            QLabel { color: #f2f2f2; }
+            QSpinBox {
+                background-color: #2a2a2a;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 4px 6px;
+                min-width: 70px;
+            }
+            QCheckBox { color: #f2f2f2; spacing: 8px; }
+            QPushButton {
+                background-color: #2c2c2c;
+                color: #ffffff;
+                border: 1px solid #4a4a4a;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-weight: 600;
+                min-width: 90px;
+            }
+            QPushButton:hover { background-color: #393939; }
+            QPushButton#ok_btn { background-color: #e50914; border: none; }
+            QPushButton#ok_btn:hover { background-color: #ff1a25; }
+            """
+        )
+
+        self._settings = dict(settings)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 14)
+        root.setSpacing(14)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("After"))
+        self.spin_pause_after = QSpinBox()
+        self.spin_pause_after.setRange(1, 10000)
+        self.spin_pause_after.setValue(int(self._settings.get("pause_after_connections", 20)))
+        row1.addWidget(self.spin_pause_after)
+        row1.addWidget(QLabel("web connections, pause from"))
+        self.spin_pause_min = QSpinBox()
+        self.spin_pause_min.setRange(0, 3600)
+        self.spin_pause_min.setValue(int(self._settings.get("pause_min_seconds", 10)))
+        row1.addWidget(self.spin_pause_min)
+        row1.addWidget(QLabel("to"))
+        self.spin_pause_max = QSpinBox()
+        self.spin_pause_max.setRange(0, 3600)
+        self.spin_pause_max.setValue(int(self._settings.get("pause_max_seconds", 60)))
+        row1.addWidget(self.spin_pause_max)
+        row1.addWidget(QLabel("seconds"))
+        row1.addStretch()
+        root.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Maximum concurrent workers"))
+        self.spin_workers = QSpinBox()
+        self.spin_workers.setRange(1, 2)
+        self.spin_workers.setValue(min(2, int(self._settings.get("max_workers", 2))))
+        row2.addWidget(self.spin_workers)
+        row2.addStretch()
+        root.addLayout(row2)
+
+        self.chk_auto_sort = QCheckBox("Auto sort table by Total Average after finishing")
+        self.chk_auto_sort.setChecked(bool(self._settings.get("auto_sort_total_average", True)))
+        root.addWidget(self.chk_auto_sort)
+
+        self.chk_browser_default = QCheckBox("Enable embedded browser panel by default")
+        self.chk_browser_default.setChecked(bool(self._settings.get("enable_embedded_browser_default", False)))
+        root.addWidget(self.chk_browser_default)
+
+        self.chk_dark_charts = QCheckBox("Dark theme for charts")
+        self.chk_dark_charts.setChecked(bool(self._settings.get("dark_theme_charts", True)))
+        root.addWidget(self.chk_dark_charts)
+
+        root.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_ok = QPushButton("OK")
+        btn_ok.setObjectName("ok_btn")
+        btn_cancel = QPushButton("Cancel")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        root.addLayout(btn_row)
+
+    def get_settings(self):
+        pause_min = int(self.spin_pause_min.value())
+        pause_max = int(self.spin_pause_max.value())
+        if pause_max < pause_min:
+            pause_min, pause_max = pause_max, pause_min
+
+        return {
+            "pause_after_connections": int(self.spin_pause_after.value()),
+            "pause_min_seconds": pause_min,
+            "pause_max_seconds": pause_max,
+            "max_workers": min(2, int(self.spin_workers.value())),
+            "auto_sort_total_average": bool(self.chk_auto_sort.isChecked()),
+            "enable_embedded_browser_default": bool(self.chk_browser_default.isChecked()),
+            "dark_theme_charts": bool(self.chk_dark_charts.isChecked()),
+        }
+
+
 class TrendsTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
         self._sparkline_cache = {}
+        self._worker_status_text = ""
+        self.trends_settings = {
+            "pause_after_connections": 20,
+            "pause_min_seconds": 10,
+            "pause_max_seconds": 60,
+            "max_workers": 2,
+            "auto_sort_total_average": True,
+            "enable_embedded_browser_default": False,
+            "dark_theme_charts": True,
+        }
         self.browser_view = None
         self._webengine_available = False
         self.browser_panel = None
@@ -338,6 +508,7 @@ class TrendsTab(QWidget):
         self.btn_trends_settings.setFixedSize(100, 28)
         self.btn_trends_settings.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
         self.btn_trends_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_trends_settings.clicked.connect(self.open_settings_dialog)
 
         self.btn_trends_browser = QPushButton("Browser")
         self.btn_trends_browser.setFixedSize(100, 28)
@@ -429,6 +600,9 @@ class TrendsTab(QWidget):
         self.trends_table.verticalHeader().setDefaultSectionSize(36)
         self.trends_table.verticalHeader().setVisible(False)
         self.trends_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.trends_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.trends_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.trends_table.customContextMenuRequested.connect(self.show_trends_context_menu)
         self.trends_table.setStyleSheet(
             "QTableWidget { background-color: #ffffff; color: #000000; gridline-color: #dddddd; border: 1px solid #cccccc; } "
             "QHeaderView::section { background-color: #f0f0f0; color: #000000; font-weight: bold; border: 1px solid #cccccc; padding: 4px; }"
@@ -477,12 +651,25 @@ class TrendsTab(QWidget):
         b_layout.addWidget(self.t_btn_file)
         b_layout.addWidget(self.t_btn_clear)
         layout.addWidget(bottom_toolbar)
+        self._refresh_status_label()
 
     def clear_trends_table(self):
         self.trends_table.setRowCount(0)
         self._sparkline_cache.clear()
         self._apply_trends_table_column_widths()
-        self.t_status.setText("Total Items: 0")
+        self._worker_status_text = ""
+        self._refresh_status_label()
+
+    def _refresh_status_label(self):
+        total_text = f"Total Items: {self.trends_table.rowCount()}"
+        if self._worker_status_text:
+            self.t_status.setText(f"{self._worker_status_text} | {total_text}")
+        else:
+            self.t_status.setText(total_text)
+
+    def _set_worker_status(self, message):
+        self._worker_status_text = str(message).strip() if message else ""
+        self._refresh_status_label()
 
     def _setup_trends_table_columns(self):
         header = self.trends_table.horizontalHeader()
@@ -704,7 +891,13 @@ class TrendsTab(QWidget):
         if not keywords:
             QMessageBox.warning(self, "No Keywords", "Please enter keywords.")
             return
+
+        if self.trends_settings.get("enable_embedded_browser_default", False) and not self.browser_panel.isVisible():
+            self.toggle_browser_panel()
+
         self.trends_table.setRowCount(0)
+        self._sparkline_cache.clear()
+        self._set_worker_status("Starting trends fetch...")
         self.trends_table.setSortingEnabled(False)
         self.btn_trends_go.hide()
         self.btn_trends_stop.show()
@@ -714,11 +907,15 @@ class TrendsTab(QWidget):
             self.t_combo_period.currentText(),
             self.t_combo_cat.currentText(),
             self.t_combo_prop.currentText(),
+            pause_after_connections=self.trends_settings.get("pause_after_connections", 20),
+            pause_min_seconds=self.trends_settings.get("pause_min_seconds", 10),
+            pause_max_seconds=self.trends_settings.get("pause_max_seconds", 60),
+            max_workers=min(2, self.trends_settings.get("max_workers", 2)),
         )
         self.trends_worker.progress_signal.connect(self.on_trends_progress)
         self.trends_worker.finished_signal.connect(self.on_trends_finished)
         self.trends_worker.error_signal.connect(self.on_trends_error)
-        self.trends_worker.status_signal.connect(lambda msg: self.t_status.setText(msg))
+        self.trends_worker.status_signal.connect(self._set_worker_status)
         self.trends_worker.start()
 
     def stop_trends_fetch(self):
@@ -765,15 +962,33 @@ class TrendsTab(QWidget):
 
         self._apply_trends_table_column_widths()
         self._refresh_sparkline_for_row(row)
-        self.t_status.setText(f"Total Items: {self.trends_table.rowCount()}")
+        keyword_item = self.trends_table.item(row, 1)
+        if keyword_item is not None:
+            self.trends_table.scrollToItem(
+                keyword_item,
+                QTableWidget.ScrollHint.PositionAtBottom,
+            )
+
+        progress_idx = data.get("ProcessedIndex")
+        progress_total = data.get("TotalKeywords")
+        if progress_idx is not None and progress_total is not None:
+            self._worker_status_text = (
+                f"Processing '{data.get('Keyword', '')}' ({progress_idx}/{progress_total})..."
+            )
+
+        self._refresh_status_label()
+        self.trends_table.viewport().update()
+        QApplication.processEvents()
 
     def on_trends_finished(self):
         self.btn_trends_stop.hide()
         self.btn_trends_stop.setText("Stop")
         self.btn_trends_go.show()
         self.trends_table.setSortingEnabled(True)
-        self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
+        if self.trends_settings.get("auto_sort_total_average", True):
+            self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
         self._apply_trends_table_column_widths()
+        self._set_worker_status("Trends fetch completed.")
 
         if self.trends_table.rowCount() > 0:
             first_kw_item = self.trends_table.item(0, 1)
@@ -787,6 +1002,7 @@ class TrendsTab(QWidget):
     def on_trends_error(self, err):
         self.btn_trends_stop.hide()
         self.btn_trends_go.show()
+        self._set_worker_status(f"Error: {err}")
         QMessageBox.critical(self, "Error", err)
 
     def show_trend_chart(self, row, column):
@@ -806,6 +1022,129 @@ class TrendsTab(QWidget):
             keyword=payload.get("keyword", ""),
             raw_data=payload.get("raw_data", []),
             google_trends_url=payload.get("google_trends_url", ""),
+            dark_theme=self.trends_settings.get("dark_theme_charts", True),
             parent=self,
         )
         dialog.exec()
+
+    def _selected_trend_rows(self):
+        return sorted({idx.row() for idx in self.trends_table.selectedIndexes()})
+
+    def _keyword_at_row(self, row):
+        item = self.trends_table.item(row, 1)
+        return item.text().strip() if item is not None else ""
+
+    def _selected_keywords(self):
+        return [kw for kw in (self._keyword_at_row(r) for r in self._selected_trend_rows()) if kw]
+
+    def _all_keywords(self):
+        kws = []
+        for row in range(self.trends_table.rowCount()):
+            kw = self._keyword_at_row(row)
+            if kw:
+                kws.append(kw)
+        return kws
+
+    def _show_status_message(self, message):
+        if hasattr(self.main_window, "statusBar") and self.main_window.statusBar():
+            self.main_window.statusBar().showMessage(message, 4000)
+        self.t_status.setText(message)
+
+    def _show_placeholder_action(self, action_name):
+        self._show_status_message(f"{action_name} is not wired yet.")
+
+    def _send_ke_selected(self):
+        keywords = self._selected_keywords()
+        if not keywords:
+            QMessageBox.information(self, "Keywords Everywhere", "No selected rows.")
+            return
+        self._show_status_message(f"Queued {len(keywords)} selected keyword(s) to Keywords Everywhere tool.")
+
+    def _send_ke_all(self):
+        keywords = self._all_keywords()
+        if not keywords:
+            QMessageBox.information(self, "Keywords Everywhere", "No keywords in Trends table.")
+            return
+        self._show_status_message(f"Queued ALL {len(keywords)} keyword(s) to Keywords Everywhere tool.")
+
+    def _copy_selected_keywords(self):
+        keywords = self._selected_keywords()
+        if not keywords:
+            QMessageBox.information(self, "Copy", "No selected rows to copy.")
+            return
+        QApplication.clipboard().setText("\n".join(keywords))
+        self._show_status_message(f"Copied {len(keywords)} keyword(s).")
+
+    def _delete_selected_rows(self):
+        rows = self._selected_trend_rows()
+        if not rows:
+            QMessageBox.information(self, "Delete", "No selected rows to delete.")
+            return
+        for row in reversed(rows):
+            self.trends_table.removeRow(row)
+        self._refresh_sparklines()
+        self.t_status.setText(f"Total Items: {self.trends_table.rowCount()}")
+
+    def _toggle_row_selection(self):
+        rows = self._selected_trend_rows()
+        if not rows:
+            self.trends_table.selectAll()
+            return
+        all_selected = len(rows) == self.trends_table.rowCount()
+        if all_selected:
+            self.trends_table.clearSelection()
+        else:
+            self.trends_table.selectAll()
+
+    def _focus_search_input(self):
+        self.trends_input.setFocus()
+        self.trends_input.selectAll()
+
+    def show_trends_context_menu(self, pos):
+        row = self.trends_table.rowAt(pos.y())
+        if row < 0:
+            return
+        if row >= 0 and row not in self._selected_trend_rows():
+            self.trends_table.selectRow(row)
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu { background-color: #2b2b2b; color: #ffffff; border: 1px solid #444444; }
+            QMenu::item { padding: 8px 24px; }
+            QMenu::item:selected { background-color: #e50914; color: #ffffff; }
+            """
+        )
+
+        action_video = menu.addAction("Send to Video search tool")
+        action_channel = menu.addAction("Send to Channel search tool")
+        action_volume = menu.addAction("Get Search Volume")
+        menu.addSeparator()
+        action_ke_selected = menu.addAction("Send SELECTED to Keywords Everywhere tool")
+        action_ke_all = menu.addAction("Send ALL to Keywords Everywhere tool")
+        menu.addSeparator()
+        action_checkboxes = menu.addAction("Checkboxes")
+        action_filters = menu.addAction("Filters")
+        action_copy = menu.addAction("Copy")
+        action_hashtags = menu.addAction("Hashtags")
+        action_search = menu.addAction("Search")
+        action_delete = menu.addAction("Delete")
+
+        action_video.triggered.connect(lambda: self._show_placeholder_action("Send to Video search tool"))
+        action_channel.triggered.connect(lambda: self._show_placeholder_action("Send to Channel search tool"))
+        action_volume.triggered.connect(lambda: self._show_placeholder_action("Get Search Volume"))
+        action_ke_selected.triggered.connect(self._send_ke_selected)
+        action_ke_all.triggered.connect(self._send_ke_all)
+        action_checkboxes.triggered.connect(self._toggle_row_selection)
+        action_filters.triggered.connect(lambda: self._show_placeholder_action("Filters"))
+        action_copy.triggered.connect(self._copy_selected_keywords)
+        action_hashtags.triggered.connect(lambda: self._show_placeholder_action("Hashtags"))
+        action_search.triggered.connect(self._focus_search_input)
+        action_delete.triggered.connect(self._delete_selected_rows)
+
+        menu.exec(self.trends_table.viewport().mapToGlobal(pos))
+
+    def open_settings_dialog(self):
+        dialog = TrendsSettingsDialog(self.trends_settings, self)
+        if dialog.exec():
+            self.trends_settings = dialog.get_settings()
