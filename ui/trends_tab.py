@@ -1,7 +1,9 @@
 import webbrowser
+import sys
 from datetime import datetime
+from urllib.parse import urlencode
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -24,7 +26,14 @@ from PyQt6.QtWidgets import (
 )
 
 from core.trends_fetcher import TrendsFetcherWorker
-from utils.constants import COUNTRY_LIST
+from utils.constants import COUNTRY_LIST, GEO_MAP, TIME_MAP
+
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    _QTWEBENGINE_IMPORT_ERROR = ""
+except Exception as _qtwebengine_exc:
+    QWebEngineView = None
+    _QTWEBENGINE_IMPORT_ERROR = str(_qtwebengine_exc)
 
 
 class TrendChartDialog(QDialog):
@@ -242,6 +251,13 @@ class TrendsTab(QWidget):
         super().__init__()
         self.main_window = main_window
         self._sparkline_cache = {}
+        self.browser_view = None
+        self._webengine_available = False
+        self.browser_panel = None
+        self.browser_panel_layout = None
+        self.browser_placeholder = None
+        self._webengine_error = ""
+        self.trends_splitter = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -281,6 +297,7 @@ class TrendsTab(QWidget):
         self.btn_trends_browser.setFixedSize(100, 28)
         self.btn_trends_browser.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
         self.btn_trends_browser.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_trends_browser.clicked.connect(self.toggle_browser_panel)
 
         top_layout.addWidget(self.btn_trends_go)
         top_layout.addWidget(self.btn_trends_stop)
@@ -291,7 +308,7 @@ class TrendsTab(QWidget):
 
         layout.addWidget(top_bar)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.trends_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         left_panel = QFrame()
         left_layout = QVBoxLayout(left_panel)
@@ -372,10 +389,27 @@ class TrendsTab(QWidget):
         )
         self.trends_table.cellDoubleClicked.connect(self.show_trend_chart)
 
-        splitter.addWidget(left_panel)
-        splitter.addWidget(self.trends_table)
-        splitter.setSizes([260, 800])
-        layout.addWidget(splitter, stretch=1)
+        self.browser_panel = QFrame()
+        self.browser_panel.setMinimumWidth(320)
+        self.browser_panel_layout = QVBoxLayout(self.browser_panel)
+        self.browser_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.browser_panel_layout.setSpacing(0)
+        self.browser_placeholder = QLabel("Browser panel is ready.\nClick Browser to load Google Trends.")
+        self.browser_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.browser_placeholder.setStyleSheet("color: #dddddd; background-color: #1f1f1f; border: 1px solid #333333;")
+        self.browser_panel_layout.addWidget(self.browser_placeholder)
+
+        self.browser_panel.hide()
+
+        self.trends_splitter.addWidget(left_panel)
+        self.trends_splitter.addWidget(self.trends_table)
+        self.trends_splitter.addWidget(self.browser_panel)
+        self.trends_splitter.setStretchFactor(0, 0)
+        self.trends_splitter.setStretchFactor(1, 1)
+        self.trends_splitter.setStretchFactor(2, 0)
+        self.trends_splitter.setCollapsible(2, True)
+        self.trends_splitter.setSizes([260, 980, 0])
+        layout.addWidget(self.trends_splitter, stretch=1)
 
         bottom_toolbar = QFrame()
         b_layout = QHBoxLayout(bottom_toolbar)
@@ -525,6 +559,107 @@ class TrendsTab(QWidget):
         for row in range(self.trends_table.rowCount()):
             self._refresh_sparkline_for_row(row)
 
+    def _set_property_to_youtube(self):
+        idx = self.t_combo_prop.findText("Youtube Search", Qt.MatchFlag.MatchFixedString)
+        if idx < 0:
+            idx = self.t_combo_prop.findText("YouTube Search", Qt.MatchFlag.MatchFixedString)
+        if idx >= 0:
+            self.t_combo_prop.setCurrentIndex(idx)
+
+    def _ensure_embedded_browser(self):
+        if self.browser_view is not None:
+            return True
+
+        if QWebEngineView is None:
+            self._webengine_available = False
+            self._webengine_error = _QTWEBENGINE_IMPORT_ERROR or "PyQt6-WebEngine import failed."
+            if self.browser_placeholder is not None:
+                self.browser_placeholder.setText(
+                    "Embedded browser could not load.\n"
+                    "Install with:\npython -m pip install PyQt6-WebEngine\n\n"
+                    f"Python: {sys.executable}\n"
+                    f"Error: {self._webengine_error}"
+                )
+            return False
+
+        try:
+            self.browser_view = QWebEngineView()
+            self._webengine_available = True
+            self._webengine_error = ""
+
+            if self.browser_placeholder is not None:
+                self.browser_placeholder.deleteLater()
+                self.browser_placeholder = None
+
+            self.browser_panel_layout.addWidget(self.browser_view)
+            return True
+        except Exception as exc:
+            self.browser_view = None
+            self._webengine_available = False
+            self._webengine_error = str(exc)
+
+            if self.browser_placeholder is not None:
+                self.browser_placeholder.setText(
+                    "Embedded browser could not load.\n"
+                    "Install with:\npython -m pip install PyQt6-WebEngine\n\n"
+                    f"Python: {sys.executable}\n"
+                    f"Error: {self._webengine_error}"
+                )
+            return False
+
+    def _build_embedded_trends_url(self, keyword=None):
+        self._set_property_to_youtube()
+        params = {"gprop": "youtube"}
+
+        geo_code = GEO_MAP.get(self.t_combo_country.currentText(), "")
+        if geo_code:
+            params["geo"] = geo_code
+
+        tf_code = TIME_MAP.get(self.t_combo_period.currentText(), "today 1-m")
+        if tf_code:
+            params["date"] = tf_code
+
+        if keyword:
+            params["q"] = keyword
+
+        return f"https://trends.google.com/trends/explore?{urlencode(params)}"
+
+    def _load_embedded_browser(self, keyword=None):
+        if not self._ensure_embedded_browser() or self.browser_view is None:
+            return
+        url = self._build_embedded_trends_url(keyword=keyword)
+        self.browser_view.setUrl(QUrl(url))
+
+    def toggle_browser_panel(self):
+        if not self._ensure_embedded_browser():
+            QMessageBox.warning(
+                self,
+                "Browser Unavailable",
+                "Embedded browser could not initialize.\n"
+                "Run in the same interpreter:\n"
+                "python -m pip install PyQt6-WebEngine\n\n"
+                f"Python: {sys.executable}\n"
+                f"Error: {self._webengine_error or 'Unknown'}",
+            )
+            return
+
+        if self.browser_panel.isVisible():
+            self.browser_panel.hide()
+            self.btn_trends_browser.setText("Browser")
+            total_width = max(900, self.trends_splitter.width())
+            self.trends_splitter.setSizes([260, max(400, total_width - 260), 0])
+            return
+
+        self.browser_panel.show()
+        self.btn_trends_browser.setText("Hide Browser")
+        self._load_embedded_browser()
+
+        total_width = max(1200, self.trends_splitter.width())
+        left_width = 260
+        browser_width = max(340, int(total_width * 0.33))
+        table_width = max(460, total_width - left_width - browser_width)
+        self.trends_splitter.setSizes([left_width, table_width, browser_width])
+
     def start_trends_fetch(self):
         text = self.trends_input.toPlainText()
         keywords = [line.strip() for line in text.split("\n") if line.strip()]
@@ -601,6 +736,14 @@ class TrendsTab(QWidget):
         self.trends_table.setSortingEnabled(True)
         self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
         self._apply_trends_table_column_widths()
+
+        if self.trends_table.rowCount() > 0:
+            first_kw_item = self.trends_table.item(0, 1)
+            if first_kw_item is not None:
+                first_keyword = first_kw_item.text().strip()
+                if first_keyword:
+                    self._load_embedded_browser(first_keyword)
+
         QMessageBox.information(self, "Finished", "Trends data fetching complete!")
 
     def on_trends_error(self, err):
