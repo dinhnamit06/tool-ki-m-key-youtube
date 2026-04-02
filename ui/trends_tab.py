@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QSpinBox,
     QStyle,
+    QInputDialog,
 )
 
 from core.trends_fetcher import TrendsFetcherWorker
@@ -487,6 +488,11 @@ class TrendsTab(QWidget):
         self._pending_input_keywords = []
         self._chart_header_checked = False
         self._chart_check_syncing = False
+        self._filter_keyword_text = ""
+        self._filter_country_value = ""
+        self._filter_category_value = ""
+        self._filter_property_value = ""
+        self._filter_checked_only = False
         self._browser_wait_timer = QTimer(self)
         self._browser_wait_timer.setSingleShot(True)
         self._browser_wait_timer.timeout.connect(self._load_next_browser_keyword)
@@ -679,6 +685,7 @@ class TrendsTab(QWidget):
         self._sparkline_cache.clear()
         self._chart_header_checked = False
         self._update_chart_header_label()
+        self._clear_trends_filters(update_ui=False)
         self._apply_trends_table_column_widths()
         self._worker_status_text = ""
         self._pending_input_keywords = []
@@ -715,6 +722,18 @@ class TrendsTab(QWidget):
             9: (90, 130),  # Trend Slope
             10: (100, 145) # Trending Spike
         }
+        self._trends_default_widths = {
+            0: 128,
+            2: 120,
+            3: 120,
+            4: 115,
+            5: 115,
+            6: 95,
+            7: 125,
+            8: 108,
+            9: 108,
+            10: 116,
+        }
         self._apply_trends_table_column_widths()
 
     def _update_chart_header_label(self):
@@ -746,6 +765,8 @@ class TrendsTab(QWidget):
 
         self._chart_header_checked = bool(checked)
         self._update_chart_header_label()
+        if self._filter_checked_only:
+            self._apply_trends_filters()
 
     def _refresh_chart_header_checked_state(self):
         row_count = self.trends_table.rowCount()
@@ -777,6 +798,8 @@ class TrendsTab(QWidget):
         if item is None or item.column() != 0:
             return
         self._refresh_chart_header_checked_state()
+        if self._filter_checked_only:
+            self._apply_trends_filters()
 
     def _apply_trends_table_column_widths(self):
         old_chart_width = self.trends_table.columnWidth(0)
@@ -788,6 +811,60 @@ class TrendsTab(QWidget):
             self.trends_table.setColumnWidth(col, width)
         if self.trends_table.columnWidth(0) != old_chart_width:
             self._refresh_sparklines()
+
+    def _auto_fit_trends_column_widths(self):
+        if self.trends_table.columnCount() <= 0:
+            return
+
+        header = self.trends_table.horizontalHeader()
+        old_chart_width = self.trends_table.columnWidth(0)
+        col_count = self.trends_table.columnCount()
+
+        for col in range(col_count):
+            if col == 0:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+
+        for col in range(col_count):
+            if col != 0:
+                self.trends_table.resizeColumnToContents(col)
+            measured = self.trends_table.columnWidth(col) + 16
+            if col in self._trends_col_bounds:
+                min_w, max_w = self._trends_col_bounds[col]
+                width = max(min_w, min(measured, max_w))
+            elif col == 1:
+                width = max(220, min(measured, 620))
+            else:
+                width = max(90, min(measured, 420))
+            self.trends_table.setColumnWidth(col, width)
+
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        for col in range(1, col_count):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+
+        if self.trends_table.columnWidth(0) != old_chart_width:
+            self._refresh_sparklines()
+        self._show_status_message("Auto-fit column widths applied.")
+
+    def _reset_trends_column_widths(self):
+        header = self.trends_table.horizontalHeader()
+        old_chart_width = self.trends_table.columnWidth(0)
+
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for col in range(2, self.trends_table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+
+        for col, width in self._trends_default_widths.items():
+            self.trends_table.setColumnWidth(col, width)
+
+        self._apply_trends_table_column_widths()
+
+        if self.trends_table.columnWidth(0) != old_chart_width:
+            self._refresh_sparklines()
+        self._show_status_message("Column widths reset.")
 
     @staticmethod
     def _extract_values(raw_data):
@@ -1185,6 +1262,8 @@ class TrendsTab(QWidget):
         self.trends_table.viewport().update()
         QApplication.processEvents()
         self._refresh_chart_header_checked_state()
+        if self._filter_summary():
+            self._apply_trends_filters()
 
     def on_trends_finished(self):
         if not self._browser_sequence_active:
@@ -1445,10 +1524,220 @@ class TrendsTab(QWidget):
         self.trends_input.setFocus()
         self.trends_input.selectAll()
 
+    def _search_keywords_with_engine(self, engine, keywords, scope_label):
+        clean_keywords = [str(k).strip() for k in keywords if str(k).strip()]
+        if not clean_keywords:
+            QMessageBox.warning(self, "Search", f"No keywords available for {scope_label}.")
+            return
+
+        if len(clean_keywords) > 12:
+            confirm = QMessageBox.question(
+                self,
+                "Search",
+                f"This will open {len(clean_keywords)} browser tabs for {scope_label}.\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            from utils.helpers import web_search
+        except Exception as exc:
+            QMessageBox.critical(self, "Search Error", f"Cannot load web search helper:\n{exc}")
+            return
+
+        opened = 0
+        for keyword in clean_keywords:
+            try:
+                web_search(engine, keyword)
+                opened += 1
+            except Exception:
+                continue
+
+        if opened <= 0:
+            QMessageBox.warning(self, "Search", "No browser tabs were opened.")
+            return
+        self._show_status_message(f"Opened {opened} tab(s) on {engine} for {scope_label}.")
+
+    def _search_current_row_with_engine(self, engine):
+        row = getattr(self, "_context_menu_row", -1)
+        if row is None or row < 0:
+            rows = self._selected_trend_rows()
+            row = rows[0] if rows else -1
+        if row < 0:
+            self._warn_select_rows()
+            return
+        keyword = self._keyword_at_row(row)
+        self._search_keywords_with_engine(engine, [keyword], "current row")
+
+    def _search_selected_with_engine(self, engine):
+        keywords = self._selected_keywords()
+        if not keywords:
+            self._warn_select_rows()
+            return
+        self._search_keywords_with_engine(engine, keywords, "selected rows")
+
+    def _search_all_with_engine(self, engine):
+        keywords = self._all_keywords()
+        self._search_keywords_with_engine(engine, keywords, "all rows")
+
+    def _build_search_scope_submenu(self, parent_menu, scope_title, callback):
+        engines = [
+            "Google Trends",
+            "Google Search",
+            "YouTube Search",
+            "Bing Search",
+            "Amazon",
+            "eBay",
+        ]
+        scope_menu = QMenu(scope_title, parent_menu)
+        for engine in engines:
+            action = scope_menu.addAction(engine)
+            action.triggered.connect(lambda _checked=False, e=engine, cb=callback: cb(e))
+        return scope_menu
+
+    def _text_at(self, row, col):
+        item = self.trends_table.item(row, col)
+        return item.text().strip() if item is not None else ""
+
+    def _selected_row_for_filter(self):
+        rows = self._selected_trend_rows()
+        if not rows:
+            self._warn_select_rows()
+            return -1
+        return rows[0]
+
+    def _filter_summary(self):
+        tags = []
+        if self._filter_keyword_text:
+            tags.append(f"keyword~'{self._filter_keyword_text}'")
+        if self._filter_country_value:
+            tags.append(f"country='{self._filter_country_value}'")
+        if self._filter_category_value:
+            tags.append(f"category='{self._filter_category_value}'")
+        if self._filter_property_value:
+            tags.append(f"property='{self._filter_property_value}'")
+        if self._filter_checked_only:
+            tags.append("checked-only")
+        return ", ".join(tags)
+
+    def _apply_trends_filters(self):
+        total = self.trends_table.rowCount()
+        visible = 0
+        keyword_filter = self._filter_keyword_text.lower().strip()
+
+        for row in range(total):
+            row_visible = True
+
+            if keyword_filter:
+                kw_text = self._text_at(row, 1).lower()
+                if keyword_filter not in kw_text:
+                    row_visible = False
+
+            if row_visible and self._filter_country_value:
+                row_visible = self._text_at(row, 2) == self._filter_country_value
+
+            if row_visible and self._filter_category_value:
+                row_visible = self._text_at(row, 4) == self._filter_category_value
+
+            if row_visible and self._filter_property_value:
+                row_visible = self._text_at(row, 5) == self._filter_property_value
+
+            if row_visible and self._filter_checked_only:
+                chart_item = self.trends_table.item(row, 0)
+                row_visible = chart_item is not None and chart_item.checkState() == Qt.CheckState.Checked
+
+            self.trends_table.setRowHidden(row, not row_visible)
+            if row_visible:
+                visible += 1
+
+        summary = self._filter_summary()
+        if summary:
+            self._show_status_message(f"Filters applied: {summary} • Visible {visible}/{total}")
+        else:
+            self._show_status_message(f"Filters cleared • Visible {visible}/{total}")
+
+    def _clear_trends_filters(self, update_ui=True):
+        self._filter_keyword_text = ""
+        self._filter_country_value = ""
+        self._filter_category_value = ""
+        self._filter_property_value = ""
+        self._filter_checked_only = False
+        if update_ui:
+            self._apply_trends_filters()
+
+    def _set_keyword_filter_dialog(self):
+        current = self._filter_keyword_text
+        text, ok = QInputDialog.getText(
+            self,
+            "Filter Keywords",
+            "Keyword contains:",
+            text=current,
+        )
+        if not ok:
+            return
+        self._filter_keyword_text = text.strip()
+        self._apply_trends_filters()
+
+    def _set_country_filter_from_selected(self):
+        row = self._selected_row_for_filter()
+        if row < 0:
+            return
+        value = self._text_at(row, 2)
+        if not value:
+            QMessageBox.warning(self, "Filter", "Selected row has no Country value.")
+            return
+        self._filter_country_value = value
+        self._apply_trends_filters()
+
+    def _set_category_filter_from_selected(self):
+        row = self._selected_row_for_filter()
+        if row < 0:
+            return
+        value = self._text_at(row, 4)
+        if not value:
+            QMessageBox.warning(self, "Filter", "Selected row has no Category value.")
+            return
+        self._filter_category_value = value
+        self._apply_trends_filters()
+
+    def _set_property_filter_from_selected(self):
+        row = self._selected_row_for_filter()
+        if row < 0:
+            return
+        value = self._text_at(row, 5)
+        if not value:
+            QMessageBox.warning(self, "Filter", "Selected row has no Property value.")
+            return
+        self._filter_property_value = value
+        self._apply_trends_filters()
+
+    def _toggle_checked_only_filter(self):
+        self._filter_checked_only = not self._filter_checked_only
+        self._apply_trends_filters()
+
+    def _clear_keyword_filter_only(self):
+        self._filter_keyword_text = ""
+        self._apply_trends_filters()
+
+    def _clear_country_filter_only(self):
+        self._filter_country_value = ""
+        self._apply_trends_filters()
+
+    def _clear_category_filter_only(self):
+        self._filter_category_value = ""
+        self._apply_trends_filters()
+
+    def _clear_property_filter_only(self):
+        self._filter_property_value = ""
+        self._apply_trends_filters()
+
     def show_trends_context_menu(self, pos):
         row = self.trends_table.rowAt(pos.y())
         if row < 0:
             return
+        self._context_menu_row = row
         if row >= 0 and row not in self._selected_trend_rows():
             self.trends_table.selectRow(row)
 
@@ -1512,12 +1801,46 @@ class TrendsTab(QWidget):
             self._toggle_row_selection,
             QStyle.StandardPixmap.SP_DialogApplyButton,
         )
-        self._add_context_action(
-            menu,
-            "Filters",
-            self._show_next_steps_message,
-            QStyle.StandardPixmap.SP_DialogResetButton,
-        )
+        filters_menu = QMenu("Filters", menu)
+        filters_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
+
+        action_kw = filters_menu.addAction("Keyword contains...")
+        action_kw.triggered.connect(self._set_keyword_filter_dialog)
+
+        action_country = filters_menu.addAction("Country = selected row")
+        action_country.triggered.connect(self._set_country_filter_from_selected)
+
+        action_category = filters_menu.addAction("Category = selected row")
+        action_category.triggered.connect(self._set_category_filter_from_selected)
+
+        action_property = filters_menu.addAction("Property = selected row")
+        action_property.triggered.connect(self._set_property_filter_from_selected)
+
+        filters_menu.addSeparator()
+
+        action_checked_only = filters_menu.addAction("Checked rows only")
+        action_checked_only.setCheckable(True)
+        action_checked_only.setChecked(self._filter_checked_only)
+        action_checked_only.triggered.connect(self._toggle_checked_only_filter)
+
+        filters_menu.addSeparator()
+
+        clear_keyword = filters_menu.addAction("Clear keyword filter")
+        clear_keyword.triggered.connect(self._clear_keyword_filter_only)
+
+        clear_country = filters_menu.addAction("Clear country filter")
+        clear_country.triggered.connect(self._clear_country_filter_only)
+
+        clear_category = filters_menu.addAction("Clear category filter")
+        clear_category.triggered.connect(self._clear_category_filter_only)
+
+        clear_property = filters_menu.addAction("Clear property filter")
+        clear_property.triggered.connect(self._clear_property_filter_only)
+
+        clear_all = filters_menu.addAction("Clear all filters")
+        clear_all.triggered.connect(lambda: self._clear_trends_filters(update_ui=True))
+
+        menu.addMenu(filters_menu)
 
         menu.addSeparator()
 
@@ -1552,22 +1875,22 @@ class TrendsTab(QWidget):
         hash_action.triggered.connect(lambda _checked=False: self._show_next_steps_message())
         menu.addMenu(hashtags_menu)
 
-        self._add_context_action(
-            menu,
-            "Search",
-            self._show_next_steps_message,
-            QStyle.StandardPixmap.SP_FileDialogContentsView,
-        )
+        search_menu = QMenu("Search", menu)
+        search_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        search_menu.addMenu(self._build_search_scope_submenu(search_menu, "Current row", self._search_current_row_with_engine))
+        search_menu.addMenu(self._build_search_scope_submenu(search_menu, "SELECTED rows", self._search_selected_with_engine))
+        search_menu.addMenu(self._build_search_scope_submenu(search_menu, "ALL rows", self._search_all_with_engine))
+        menu.addMenu(search_menu)
         self._add_context_action(
             menu,
             "Auto-fit column widths",
-            self._show_next_steps_message,
+            self._auto_fit_trends_column_widths,
             QStyle.StandardPixmap.SP_TitleBarShadeButton,
         )
         self._add_context_action(
             menu,
             "Reset column widths",
-            self._show_next_steps_message,
+            self._reset_trends_column_widths,
             QStyle.StandardPixmap.SP_BrowserReload,
         )
         self._add_context_action(
