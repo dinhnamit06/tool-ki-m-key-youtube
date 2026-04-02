@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.trends_fetcher import TrendsFetcherWorker
+from utils.constants import COUNTRY_LIST
 
 
 class TrendChartDialog(QDialog):
@@ -306,7 +307,8 @@ class TrendsTab(QWidget):
         label_style = "color: #f1f1f1; font-size: 13px;"
 
         self.t_combo_country = QComboBox()
-        self.t_combo_country.addItems(["Worldwide", "United States", "Viet Nam", "United Kingdom", "Japan"])
+        self.t_combo_country.addItems(COUNTRY_LIST)
+        self.t_combo_country.setMaxVisibleItems(18)
         self.t_combo_country.setStyleSheet(combo_style)
         lbl_country = QLabel("Country:")
         lbl_country.setStyleSheet(label_style)
@@ -412,7 +414,7 @@ class TrendsTab(QWidget):
 
         self._trends_col_bounds = {
             0: (120, 140), # Chart sparkline
-            2: (95, 130),  # Country
+            2: (105, 180), # Country
             3: (105, 155), # Time Period
             4: (95, 150),  # Category
             5: (95, 145),  # Property

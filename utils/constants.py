@@ -31,13 +31,67 @@ PROP_MAP = {
     "Google Shopping": "froogle"
 }
 
-GEO_MAP = {
-    "Worldwide": "", 
-    "United States": "US", 
-    "Viet Nam": "VN", 
-    "United Kingdom": "GB", 
-    "Japan": "JP"
+COUNTRY_GEO_MAP = {
+    "Worldwide": "",
+    "United States": "US",
+    "Vietnam": "VN",
+    "India": "IN",
+    "Brazil": "BR",
+    "Indonesia": "ID",
+    "Japan": "JP",
+    "South Korea": "KR",
+    "United Kingdom": "GB",
+    "Germany": "DE",
+    "France": "FR",
+    "Russia": "RU",
+    "Philippines": "PH",
+    "Thailand": "TH",
+    "Malaysia": "MY",
+    "Singapore": "SG",
+    "Australia": "AU",
+    "Canada": "CA",
+    "Mexico": "MX",
+    "Spain": "ES",
+    "Italy": "IT",
+    "Netherlands": "NL",
+    "Sweden": "SE",
+    "Norway": "NO",
+    "Denmark": "DK",
+    "Finland": "FI",
+    "Poland": "PL",
+    "Turkey": "TR",
+    "Saudi Arabia": "SA",
+    "United Arab Emirates": "AE",
+    "Egypt": "EG",
+    "South Africa": "ZA",
+    "Nigeria": "NG",
+    "Pakistan": "PK",
+    "Bangladesh": "BD",
+    "Argentina": "AR",
+    "Chile": "CL",
+    "Colombia": "CO",
+    "Peru": "PE",
+    "New Zealand": "NZ",
+    "Taiwan": "TW",
+    "Hong Kong": "HK",
+    "Ukraine": "UA",
+    "Israel": "IL",
+    "Switzerland": "CH",
+    "Austria": "AT",
+    "Belgium": "BE",
+    "Portugal": "PT",
+    "Ireland": "IE",
+    "Czechia": "CZ",
+    "Greece": "GR",
+    "Romania": "RO",
+    "Hungary": "HU",
 }
+
+COUNTRY_LIST = list(COUNTRY_GEO_MAP.keys())
+
+# Backward-compatible alias map
+GEO_MAP = dict(COUNTRY_GEO_MAP)
+GEO_MAP["Viet Nam"] = "VN"
 
 TIME_MAP = {
     "Past 30 days": "today 1-m", 
