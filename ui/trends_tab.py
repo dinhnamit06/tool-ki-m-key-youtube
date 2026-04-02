@@ -1,10 +1,11 @@
 import webbrowser
 import sys
+import random
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import numpy as np
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -31,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.trends_fetcher import TrendsFetcherWorker
-from utils.constants import COUNTRY_LIST, GEO_MAP, TIME_MAP
+from utils.constants import CAT_MAP, COUNTRY_LIST, GEO_MAP, TIME_MAP
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -475,6 +476,18 @@ class TrendsTab(QWidget):
         self.browser_placeholder = None
         self._webengine_error = ""
         self.trends_splitter = None
+        self._use_embedded_browser_mode = False
+        self._run_pytrends_with_external_browser = True
+        self._open_external_browser_sequence = False
+        self._browser_sequence_active = False
+        self._browser_keywords_queue = []
+        self._browser_keyword_index = 0
+        self._browser_wait_min_seconds = 4.5
+        self._browser_wait_max_seconds = 6.5
+        self._pending_input_keywords = []
+        self._browser_wait_timer = QTimer(self)
+        self._browser_wait_timer.setSingleShot(True)
+        self._browser_wait_timer.timeout.connect(self._load_next_browser_keyword)
         self.setup_ui()
 
     def setup_ui(self):
@@ -500,7 +513,7 @@ class TrendsTab(QWidget):
 
         self.btn_trends_stop = QPushButton("Stop")
         self.btn_trends_stop.setFixedSize(120, 28)
-        self.btn_trends_stop.setStyleSheet("background-color: #444444; color: white; border: none; font-weight: bold; border-radius: 4px;")
+        self.btn_trends_stop.setStyleSheet("background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;")
         self.btn_trends_stop.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_trends_stop.clicked.connect(self.stop_trends_fetch)
         self.btn_trends_stop.hide()
@@ -611,11 +624,12 @@ class TrendsTab(QWidget):
         self.trends_table.cellDoubleClicked.connect(self.show_trend_chart)
 
         self.browser_panel = QFrame()
-        self.browser_panel.setMinimumWidth(320)
+        self.browser_panel.setMinimumWidth(0)
+        self.browser_panel.setMaximumWidth(0)
         self.browser_panel_layout = QVBoxLayout(self.browser_panel)
         self.browser_panel_layout.setContentsMargins(0, 0, 0, 0)
         self.browser_panel_layout.setSpacing(0)
-        self.browser_placeholder = QLabel("Browser panel is ready.\nClick Browser to load Google Trends.")
+        self.browser_placeholder = QLabel("External browser mode is enabled.")
         self.browser_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.browser_placeholder.setStyleSheet("color: #dddddd; background-color: #1f1f1f; border: 1px solid #333333;")
         self.browser_panel_layout.addWidget(self.browser_placeholder)
@@ -652,6 +666,7 @@ class TrendsTab(QWidget):
         b_layout.addWidget(self.t_btn_file)
         b_layout.addWidget(self.t_btn_clear)
         layout.addWidget(bottom_toolbar)
+        self._set_fetch_buttons_running(False)
         self._refresh_status_label()
 
     def clear_trends_table(self):
@@ -659,6 +674,7 @@ class TrendsTab(QWidget):
         self._sparkline_cache.clear()
         self._apply_trends_table_column_widths()
         self._worker_status_text = ""
+        self._pending_input_keywords = []
         self._refresh_status_label()
 
     def _refresh_status_label(self):
@@ -857,51 +873,114 @@ class TrendsTab(QWidget):
         self.browser_view.setUrl(QUrl(url))
 
     def toggle_browser_panel(self):
-        if not self._ensure_embedded_browser():
-            QMessageBox.warning(
-                self,
-                "Browser Unavailable",
-                "Embedded browser could not initialize.\n"
-                "Run in the same interpreter:\n"
-                "python -m pip install PyQt6-WebEngine\n\n"
-                f"Python: {sys.executable}\n"
-                f"Error: {self._webengine_error or 'Unknown'}",
+        self._open_external_browser_sequence = not self._open_external_browser_sequence
+        if self._open_external_browser_sequence:
+            self.btn_trends_browser.setText("Browser On")
+            self.btn_trends_browser.setStyleSheet(
+                "background-color: #ff2b2b; color: white; border: none; font-weight: bold; border-radius: 4px;"
             )
-            return
-
-        if self.browser_panel.isVisible():
-            self.browser_panel.hide()
+            QMessageBox.information(
+                self,
+                "Browser Mode",
+                "External browser auto-open is ON.\nTabs will be opened in background mode when possible.",
+            )
+        else:
             self.btn_trends_browser.setText("Browser")
-            total_width = max(900, self.trends_splitter.width())
-            self.trends_splitter.setSizes([260, max(400, total_width - 260), 0])
+            self.btn_trends_browser.setStyleSheet(
+                "background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;"
+            )
+            QMessageBox.information(
+                self,
+                "Browser Mode",
+                "External browser auto-open is OFF.\nGo will fetch data in app without popping browser tabs.",
+            )
+
+    def _show_browser_panel_for_sequence(self):
+        self.browser_panel.hide()
+        self.btn_trends_browser.setText("Browser")
+        total_width = max(900, self.trends_splitter.width())
+        self.trends_splitter.setSizes([260, max(400, total_width - 260), 0])
+        return True
+
+    def _set_fetch_buttons_running(self, running):
+        self.btn_trends_go.setVisible(not running)
+        self.btn_trends_stop.setVisible(running)
+        if not running:
+            self.btn_trends_stop.setText("Stop")
+
+    def _is_pytrends_running(self):
+        return hasattr(self, "trends_worker") and self.trends_worker.isRunning()
+
+    def _build_browser_sequence_url(self, keyword):
+        self._set_property_to_youtube()
+        geo_code = GEO_MAP.get(self.t_combo_country.currentText(), "")
+        encoded_geo = quote(geo_code, safe="")
+        encoded_keyword = quote(str(keyword).strip(), safe="")
+        date_code = TIME_MAP.get(self.t_combo_period.currentText(), "today 1-m")
+        encoded_date = quote(date_code, safe="")
+        cat_code = CAT_MAP.get(self.t_combo_cat.currentText(), 0)
+        return (
+            "https://trends.google.com/trends/explore"
+            f"?geo={encoded_geo}&q={encoded_keyword}&gprop=youtube"
+            f"&date={encoded_date}&cat={cat_code}"
+        )
+
+    def _finish_browser_sequence(self, stopped):
+        self._browser_wait_timer.stop()
+        self._browser_sequence_active = False
+        self._browser_keywords_queue = []
+        self._browser_keyword_index = 0
+        if stopped:
+            self._set_worker_status("Opening in browser stopped.")
+        else:
+            self._set_worker_status("Opening in browser complete.")
+        if not self._is_pytrends_running():
+            self._set_fetch_buttons_running(False)
+
+    def _load_next_browser_keyword(self):
+        if not self._browser_sequence_active:
+            return
+        total = len(self._browser_keywords_queue)
+        if self._browser_keyword_index >= total:
+            self._finish_browser_sequence(stopped=False)
             return
 
-        self.browser_panel.show()
-        self.btn_trends_browser.setText("Hide Browser")
-        self._load_embedded_browser()
-
-        total_width = max(1200, self.trends_splitter.width())
-        left_width = 260
-        browser_width = max(340, int(total_width * 0.33))
-        table_width = max(460, total_width - left_width - browser_width)
-        self.trends_splitter.setSizes([left_width, table_width, browser_width])
-
-    def start_trends_fetch(self):
-        text = self.trends_input.toPlainText()
-        keywords = [line.strip() for line in text.split("\n") if line.strip()]
-        if not keywords:
-            QMessageBox.warning(self, "No Keywords", "Please enter keywords.")
+        keyword = self._browser_keywords_queue[self._browser_keyword_index]
+        idx = self._browser_keyword_index + 1
+        geo_code = GEO_MAP.get(self.t_combo_country.currentText(), "")
+        self._set_worker_status(f"Opening '{keyword}' in browser ({idx}/{total}) with geo={geo_code}...")
+        url = self._build_browser_sequence_url(keyword)
+        try:
+            # Background-friendly open: same browser window, avoid stealing focus when possible.
+            webbrowser.open(url, new=0, autoraise=False)
+        except Exception as exc:
+            self._set_worker_status(f"Failed to open '{keyword}' in browser: {exc}")
+            self._finish_browser_sequence(stopped=True)
             return
 
-        if self.trends_settings.get("enable_embedded_browser_default", False) and not self.browser_panel.isVisible():
-            self.toggle_browser_panel()
+        self._browser_keyword_index += 1
+        wait_seconds = random.uniform(self._browser_wait_min_seconds, self._browser_wait_max_seconds)
+        self._browser_wait_timer.start(max(1000, int(wait_seconds * 1000)))
 
-        self.trends_table.setRowCount(0)
-        self._sparkline_cache.clear()
+    def _start_browser_sequence(self, keywords):
+        if not self._show_browser_panel_for_sequence():
+            return False
+
+        self._browser_wait_timer.stop()
+        self._browser_keywords_queue = list(keywords)
+        self._browser_keyword_index = 0
+        self._browser_sequence_active = True
+        self._set_fetch_buttons_running(True)
+        self._load_next_browser_keyword()
+        return True
+
+    def _start_pytrends_fetch(self, keywords, clear_table=True):
+        if clear_table:
+            self.trends_table.setRowCount(0)
+            self._sparkline_cache.clear()
         self._set_worker_status("Starting trends fetch...")
         self.trends_table.setSortingEnabled(False)
-        self.btn_trends_go.hide()
-        self.btn_trends_stop.show()
+        self._set_fetch_buttons_running(True)
         self.trends_worker = TrendsFetcherWorker(
             keywords,
             self.t_combo_country.currentText(),
@@ -919,10 +998,63 @@ class TrendsTab(QWidget):
         self.trends_worker.status_signal.connect(self._set_worker_status)
         self.trends_worker.start()
 
+    def _remove_processed_keyword_from_input(self, keyword):
+        target = str(keyword).strip()
+        if not target:
+            return
+
+        if not self._pending_input_keywords:
+            self._pending_input_keywords = [
+                line.strip()
+                for line in self.trends_input.toPlainText().split("\n")
+                if line.strip()
+            ]
+
+        removed = False
+        for idx, item in enumerate(self._pending_input_keywords):
+            if item == target:
+                self._pending_input_keywords.pop(idx)
+                removed = True
+                break
+
+        if removed:
+            self.trends_input.blockSignals(True)
+            self.trends_input.setPlainText("\n".join(self._pending_input_keywords))
+            self.trends_input.blockSignals(False)
+
+    def start_trends_fetch(self):
+        text = self.trends_input.toPlainText()
+        keywords = [line.strip() for line in text.split("\n") if line.strip()]
+        if not keywords:
+            QMessageBox.warning(self, "No Keywords", "Please enter keywords.")
+            return
+
+        self._pending_input_keywords = list(keywords)
+        self.trends_input.blockSignals(True)
+        self.trends_input.setPlainText("\n".join(self._pending_input_keywords))
+        self.trends_input.blockSignals(False)
+
+        # Always prioritize in-app data fetch so table can fill in real time.
+        if self._run_pytrends_with_external_browser:
+            self._start_pytrends_fetch(keywords, clear_table=True)
+        else:
+            self._set_fetch_buttons_running(True)
+
+        # Optional external browser sequence (disabled by default to avoid UI focus jumps).
+        if self._open_external_browser_sequence:
+            self._start_browser_sequence(keywords)
+
     def stop_trends_fetch(self):
+        if self._browser_sequence_active:
+            self._finish_browser_sequence(stopped=True)
+
         if hasattr(self, "trends_worker") and self.trends_worker.isRunning():
             self.trends_worker.is_running = False
             self.btn_trends_stop.setText("Stopping...")
+            return
+
+        if not self._browser_sequence_active:
+            self._set_fetch_buttons_running(False)
 
     def on_trends_progress(self, data):
         row = self.trends_table.rowCount()
@@ -977,31 +1109,25 @@ class TrendsTab(QWidget):
                 QTableWidget.ScrollHint.PositionAtBottom,
             )
 
+        self._remove_processed_keyword_from_input(data.get("Keyword", ""))
+
         self._refresh_status_label()
         self.trends_table.viewport().update()
         QApplication.processEvents()
 
     def on_trends_finished(self):
-        self.btn_trends_stop.hide()
-        self.btn_trends_stop.setText("Stop")
-        self.btn_trends_go.show()
+        if not self._browser_sequence_active:
+            self._set_fetch_buttons_running(False)
         self.trends_table.setSortingEnabled(True)
         self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
         self._apply_trends_table_column_widths()
         self._set_worker_status("Trends fetch completed.")
 
-        if self.trends_table.rowCount() > 0:
-            first_kw_item = self.trends_table.item(0, 1)
-            if first_kw_item is not None:
-                first_keyword = first_kw_item.text().strip()
-                if first_keyword:
-                    self._load_embedded_browser(first_keyword)
-
         QMessageBox.information(self, "Finished", "Trends data fetching complete!")
 
     def on_trends_error(self, err):
-        self.btn_trends_stop.hide()
-        self.btn_trends_go.show()
+        if not self._browser_sequence_active:
+            self._set_fetch_buttons_running(False)
         self._set_worker_status(f"Error: {err}")
         QMessageBox.critical(self, "Error", err)
 
