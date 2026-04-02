@@ -1,7 +1,6 @@
 import random
 import threading
 import time
-from collections import deque
 from urllib.parse import urlencode
 
 import numpy as np
@@ -36,15 +35,17 @@ class TrendsFetcherWorker(QThread):
         self.gprop = gprop
         self.is_running = True
 
-        # Step 2.18 requirement: keep sequential processing for stability.
+        # Keep sequential processing for stable pytrends requests.
         self.max_workers = 1
+
+        # Kept for API compatibility with previous settings dialog.
+        self.pause_after_connections = int(pause_after_connections)
+        self.pause_min_seconds = int(pause_min_seconds)
+        self.pause_max_seconds = int(pause_max_seconds)
 
         self._thread_local = threading.local()
         self.total_requests_made = 0
-        self._burst_keywords = 4
-        self._delay_offset = 0.0
-        self._recent_request_seconds = deque(maxlen=8)
-        self._recent_inter_delays = deque(maxlen=8)
+        self._recent_request_seconds = []
 
     @staticmethod
     def _build_google_trends_url(keyword, timeframe, geo, gprop):
@@ -58,14 +59,49 @@ class TrendsFetcherWorker(QThread):
     @staticmethod
     def _is_rate_limit_error(error_text):
         err = error_text.lower()
-        return "429" in err or "rate limit" in err or "too many requests" in err
+        return (
+            "429" in err
+            or "rate limit" in err
+            or "too many requests" in err
+            or "quota" in err
+        )
 
-    def _sleep_with_stop(self, seconds):
-        ticks = max(1, int(seconds * 10))
-        for _ in range(ticks):
-            if not self.is_running:
-                return
-            time.sleep(0.1)
+    def _record_request_time(self, seconds):
+        self._recent_request_seconds.append(float(seconds))
+        if len(self._recent_request_seconds) > 12:
+            self._recent_request_seconds.pop(0)
+
+    def _format_waiting_status(self, keyword, index, total, remaining_seconds, suffix=""):
+        message = f"Processing '{keyword}' ({index}/{total}) \u2022 Waiting {remaining_seconds}s..."
+        if suffix:
+            message = f"{message} {suffix}"
+        return message
+
+    def _sleep_with_status(self, seconds, keyword, index, total, suffix=""):
+        if seconds <= 0:
+            return
+
+        deadline = time.time() + float(seconds)
+        last_shown = None
+        while self.is_running:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+
+            remaining_whole = max(1, int(round(remaining)))
+            if remaining_whole != last_shown:
+                self.status_signal.emit(
+                    self._format_waiting_status(
+                        keyword,
+                        index,
+                        total,
+                        remaining_whole,
+                        suffix=suffix,
+                    )
+                )
+                last_shown = remaining_whole
+
+            time.sleep(min(0.2, max(0.05, remaining)))
 
     def _get_thread_pytrends(self):
         if not hasattr(self._thread_local, "client"):
@@ -120,48 +156,6 @@ class TrendsFetcherWorker(QThread):
             "GoogleTrendsUrl": trends_url,
         }
 
-    def _preview_delay_for_estimate(self, finalized_keywords):
-        if finalized_keywords < self._burst_keywords:
-            return 1.5
-        return 3.5 + self._delay_offset
-
-    def _compute_inter_keyword_delay(self, finalized_keywords):
-        # Burst mode for first 4 keywords.
-        if finalized_keywords < self._burst_keywords:
-            delay_seconds = random.uniform(1.0, 2.0)
-        else:
-            # Base dynamic delay.
-            delay_seconds = random.uniform(2.5, 4.5) + self._delay_offset
-            delay_seconds = max(2.5, min(14.0, delay_seconds))
-
-        # Gradual adaptive tuning based on recent response times.
-        if len(self._recent_request_seconds) >= 3:
-            recent = list(self._recent_request_seconds)[-3:]
-            avg_recent = sum(recent) / len(recent)
-            if avg_recent > 6.5:
-                self._delay_offset = min(10.0, self._delay_offset + 0.35)
-            elif avg_recent < 4.0 and self._delay_offset > 0:
-                self._delay_offset = max(0.0, self._delay_offset - 0.2)
-
-        return delay_seconds
-
-    def _estimate_remaining_seconds(self, total_keywords, finalized_keywords):
-        remaining = max(0, total_keywords - finalized_keywords)
-        if remaining == 0:
-            return 0
-
-        avg_request = (
-            sum(self._recent_request_seconds) / len(self._recent_request_seconds)
-            if self._recent_request_seconds
-            else 4.0
-        )
-        avg_delay = (
-            sum(self._recent_inter_delays) / len(self._recent_inter_delays)
-            if self._recent_inter_delays
-            else self._preview_delay_for_estimate(finalized_keywords)
-        )
-        return int(round(remaining * (avg_request + avg_delay)))
-
     def run(self):
         try:
             from pytrends.request import TrendReq  # noqa: F401
@@ -176,84 +170,77 @@ class TrendsFetcherWorker(QThread):
         tf_code = TIME_MAP.get(self.timeframe, "today 1-m")
 
         total_keywords = len(self.keywords)
-        finalized_keywords = 0
         successful_keywords = 0
-        retry_wait_schedule = {1: 15, 2: 30, 3: 60}
-        max_retry_attempts = 3
 
-        for kw in self.keywords:
+        for keyword_index, kw in enumerate(self.keywords, start=1):
             if not self.is_running:
                 break
 
-            eta_seconds = self._estimate_remaining_seconds(total_keywords, finalized_keywords)
             self.status_signal.emit(
-                f"Processing '{kw}' ({finalized_keywords + 1}/{total_keywords}) • Estimated remaining: {eta_seconds}s"
+                f"Processing '{kw}' ({keyword_index}/{total_keywords})..."
             )
 
             keyword_success = False
-            attempts = 0
 
-            while self.is_running and attempts <= max_retry_attempts and not keyword_success:
+            for attempt in range(1, 4):
+                if not self.is_running or keyword_success:
+                    break
+
                 start_ts = time.time()
                 try:
                     payload = self._build_payload_for_keyword(kw, cat_code, tf_code, geo_code, gprop_code)
                     duration_seconds = time.time() - start_ts
                     self.total_requests_made += 1
-                    self._recent_request_seconds.append(duration_seconds)
-
-                    # Early sign of rate limit: very slow request.
-                    if duration_seconds > 8.0:
-                        self._delay_offset = min(12.0, self._delay_offset + 2.0)
-                        self.status_signal.emit(
-                            f"Slow response detected for '{kw}' ({duration_seconds:.1f}s). "
-                            "Increasing delay by 2s for next keywords."
-                        )
+                    self._record_request_time(duration_seconds)
 
                     successful_keywords += 1
                     keyword_success = True
 
-                    # Include progress metadata so UI can update row counter/status in real time.
                     payload["ProcessedIndex"] = successful_keywords
                     payload["TotalKeywords"] = total_keywords
+                    payload["KeywordIndex"] = keyword_index
+                    payload["RequestSeconds"] = round(duration_seconds, 2)
                     self.progress_signal.emit(payload)
                 except Exception as exc:
                     duration_seconds = time.time() - start_ts
                     self.total_requests_made += 1
-                    self._recent_request_seconds.append(duration_seconds)
+                    self._record_request_time(duration_seconds)
                     err_text = str(exc)
 
                     if self._is_rate_limit_error(err_text):
-                        attempts += 1
-                        if attempts <= max_retry_attempts and self.is_running:
-                            wait_seconds = retry_wait_schedule.get(attempts, 60)
-                            self._delay_offset = min(12.0, self._delay_offset + 2.0)
-                            self.status_signal.emit(
-                                f"Rate limit on '{kw}'. Waiting {wait_seconds}s before retry ({attempts}/{max_retry_attempts} attempts)..."
+                        if attempt == 1:
+                            wait_seconds = random.uniform(20.0, 35.0)
+                            self._sleep_with_status(
+                                wait_seconds,
+                                kw,
+                                keyword_index,
+                                total_keywords,
+                                suffix="(rate limit retry 1/3)",
                             )
-                            self._sleep_with_stop(wait_seconds)
+                            continue
+                        if attempt == 2:
+                            wait_seconds = random.uniform(45.0, 70.0)
+                            self._sleep_with_status(
+                                wait_seconds,
+                                kw,
+                                keyword_index,
+                                total_keywords,
+                                suffix="(rate limit retry 2/3)",
+                            )
                             continue
 
-                        self.status_signal.emit(
-                            f"Skipped '{kw}' after 3 failed attempts due to rate limit"
-                        )
+                        self.status_signal.emit(f"Skipped '{kw}' after 3 failed attempts due to rate limit")
                         break
 
-                    # Non-rate-limit errors: skip this keyword after first failure.
-                    self.error_signal.emit(f"Error fetching '{kw}': {err_text}")
+                    self.status_signal.emit(f"Error fetching '{kw}': {err_text}. Skipping keyword.")
                     break
 
-            finalized_keywords += 1
-            self.status_signal.emit(
-                f"Processed {successful_keywords}/{total_keywords} keywords "
-                f"(requests={self.total_requests_made})"
-            )
+            if self.is_running and keyword_index < total_keywords:
+                inter_delay = random.uniform(3.0, 5.5)
+                self._sleep_with_status(inter_delay, kw, keyword_index, total_keywords)
 
-            if self.is_running and finalized_keywords < total_keywords:
-                inter_delay = self._compute_inter_keyword_delay(finalized_keywords)
-                self._recent_inter_delays.append(inter_delay)
-                self.status_signal.emit(
-                    f"Stabilizing speed: waiting {inter_delay:.1f}s before next keyword..."
-                )
-                self._sleep_with_stop(inter_delay)
+            self.status_signal.emit(
+                f"Processed {keyword_index}/{total_keywords} keyword(s) \u2022 Added {successful_keywords} row(s)"
+            )
 
         self.finished_signal.emit()

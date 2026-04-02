@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QMenu,
     QSpinBox,
+    QStyle,
 )
 
 from core.trends_fetcher import TrendsFetcherWorker
@@ -930,6 +931,13 @@ class TrendsTab(QWidget):
         raw_data = data.get("RawData") or []
         chart_item = QTableWidgetItem("")
         chart_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        chart_item.setFlags(
+            chart_item.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsEnabled
+        )
+        chart_item.setCheckState(Qt.CheckState.Unchecked)
         if raw_data:
             chart_item.setForeground(QColor("#e50914"))
             chart_item.setData(
@@ -969,13 +977,6 @@ class TrendsTab(QWidget):
                 QTableWidget.ScrollHint.PositionAtBottom,
             )
 
-        progress_idx = data.get("ProcessedIndex")
-        progress_total = data.get("TotalKeywords")
-        if progress_idx is not None and progress_total is not None:
-            self._worker_status_text = (
-                f"Processing '{data.get('Keyword', '')}' ({progress_idx}/{progress_total})..."
-            )
-
         self._refresh_status_label()
         self.trends_table.viewport().update()
         QApplication.processEvents()
@@ -985,8 +986,7 @@ class TrendsTab(QWidget):
         self.btn_trends_stop.setText("Stop")
         self.btn_trends_go.show()
         self.trends_table.setSortingEnabled(True)
-        if self.trends_settings.get("auto_sort_total_average", True):
-            self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
+        self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
         self._apply_trends_table_column_widths()
         self._set_worker_status("Trends fetch completed.")
 
@@ -1030,12 +1030,36 @@ class TrendsTab(QWidget):
     def _selected_trend_rows(self):
         return sorted({idx.row() for idx in self.trends_table.selectedIndexes()})
 
+    def _checked_trend_rows(self):
+        rows = []
+        for row in range(self.trends_table.rowCount()):
+            item = self.trends_table.item(row, 0)
+            if item is None:
+                continue
+            try:
+                if item.checkState() == Qt.CheckState.Checked:
+                    rows.append(row)
+            except Exception:
+                continue
+        return rows
+
+    def _rows_for_selected_actions(self):
+        # Prefer explicit checkbox selections in column 0.
+        checked = self._checked_trend_rows()
+        if checked:
+            return sorted(checked)
+        # Fallback to highlighted row selections.
+        return self._selected_trend_rows()
+
     def _keyword_at_row(self, row):
         item = self.trends_table.item(row, 1)
         return item.text().strip() if item is not None else ""
 
+    def _keywords_from_rows(self, rows):
+        return [kw for kw in (self._keyword_at_row(r) for r in rows) if kw]
+
     def _selected_keywords(self):
-        return [kw for kw in (self._keyword_at_row(r) for r in self._selected_trend_rows()) if kw]
+        return self._keywords_from_rows(self._rows_for_selected_actions())
 
     def _all_keywords(self):
         kws = []
@@ -1050,51 +1074,173 @@ class TrendsTab(QWidget):
             self.main_window.statusBar().showMessage(message, 4000)
         self.t_status.setText(message)
 
-    def _show_placeholder_action(self, action_name):
-        self._show_status_message(f"{action_name} is not wired yet.")
+    def _show_next_steps_message(self):
+        QMessageBox.information(self, "Coming Soon", "This feature will be implemented in the next steps")
 
-    def _send_ke_selected(self):
+    def _add_context_action(self, menu, text, callback, icon=None):
+        action = menu.addAction(text)
+        if icon is not None:
+            action.setIcon(self.style().standardIcon(icon))
+        action.triggered.connect(lambda _checked=False, cb=callback: cb())
+        return action
+
+    def _warn_select_rows(self):
+        QMessageBox.warning(self, "No Selection", "Please select at least one row")
+
+    def _require_selected_keywords(self):
         keywords = self._selected_keywords()
         if not keywords:
-            QMessageBox.information(self, "Keywords Everywhere", "No selected rows.")
-            return
-        self._show_status_message(f"Queued {len(keywords)} selected keyword(s) to Keywords Everywhere tool.")
+            self._warn_select_rows()
+            return []
+        return keywords
 
-    def _send_ke_all(self):
+    def _require_selected_rows(self):
+        rows = self._rows_for_selected_actions()
+        if not rows:
+            self._warn_select_rows()
+            return []
+        return rows
+
+    def _send_to_video_search_tool(self):
+        keywords = self._require_selected_keywords()
+        if not keywords:
+            return
+        print(f"[Trends] Sent to Video search tool: {keywords}")
+        QMessageBox.information(self, "Trends", "Sent to Video search tool")
+
+    def _send_to_channel_search_tool(self):
+        keywords = self._require_selected_keywords()
+        if not keywords:
+            return
+        QMessageBox.information(self, "Trends", "Sent to Channel search tool")
+
+    def _get_search_volume_for_selected(self):
+        keywords = self._require_selected_keywords()
+        if not keywords:
+            return
+        QMessageBox.information(self, "Trends", "Getting search volume for selected keywords...")
+
+    def _send_selected_to_keywords_everywhere(self):
+        keywords = self._require_selected_keywords()
+        if not keywords:
+            return
+        QMessageBox.information(self, "Trends", "Sent SELECTED to Keywords Everywhere tool")
+
+    def _send_all_to_keywords_everywhere(self):
         keywords = self._all_keywords()
         if not keywords:
-            QMessageBox.information(self, "Keywords Everywhere", "No keywords in Trends table.")
+            QMessageBox.warning(self, "No Data", "No keywords in the table")
             return
-        self._show_status_message(f"Queued ALL {len(keywords)} keyword(s) to Keywords Everywhere tool.")
+        QMessageBox.information(self, "Trends", "Sent ALL to Keywords Everywhere tool")
 
-    def _copy_selected_keywords(self):
-        keywords = self._selected_keywords()
-        if not keywords:
-            QMessageBox.information(self, "Copy", "No selected rows to copy.")
+    def _rows_to_text_lines(self, rows):
+        lines = []
+        for row in rows:
+            parts = []
+            for col in range(1, self.trends_table.columnCount()):
+                item = self.trends_table.item(row, col)
+                parts.append(item.text().strip() if item is not None else "")
+            if any(parts):
+                lines.append("\t".join(parts))
+        return lines
+
+    def _copy_to_clipboard(self, text, success_message):
+        if not text:
             return
-        QApplication.clipboard().setText("\n".join(keywords))
-        self._show_status_message(f"Copied {len(keywords)} keyword(s).")
+        QApplication.clipboard().setText(text)
+        self._show_status_message(success_message)
 
-    def _delete_selected_rows(self):
-        rows = self._selected_trend_rows()
+    def _copy_selected_rows_to_clipboard(self):
+        rows = self._require_selected_rows()
         if not rows:
-            QMessageBox.information(self, "Delete", "No selected rows to delete.")
+            return
+        lines = self._rows_to_text_lines(rows)
+        self._copy_to_clipboard("\n".join(lines), f"Copied {len(lines)} selected row(s).")
+
+    def _copy_all_rows_to_clipboard(self):
+        rows = list(range(self.trends_table.rowCount()))
+        if not rows:
+            QMessageBox.warning(self, "No Data", "No rows in the table")
+            return
+        lines = self._rows_to_text_lines(rows)
+        self._copy_to_clipboard("\n".join(lines), f"Copied ALL {len(lines)} row(s).")
+
+    def _copy_highlighted_items_to_clipboard(self):
+        items = self.trends_table.selectedItems()
+        if not items:
+            self._warn_select_rows()
+            return
+        text = "\n".join(item.text().strip() for item in items if item.text().strip())
+        self._copy_to_clipboard(text, f"Copied {len(items)} highlighted item(s).")
+
+    def _copy_selected_keywords_to_clipboard(self, comma_separated=False):
+        keywords = self._require_selected_keywords()
+        if not keywords:
+            return
+        sep = ", " if comma_separated else "\n"
+        self._copy_to_clipboard(
+            sep.join(keywords),
+            f"Copied {len(keywords)} selected keyword(s).",
+        )
+
+    def _copy_all_keywords_to_clipboard(self, comma_separated=False):
+        keywords = self._all_keywords()
+        if not keywords:
+            QMessageBox.warning(self, "No Data", "No keywords in the table")
+            return
+        sep = ", " if comma_separated else "\n"
+        self._copy_to_clipboard(
+            sep.join(keywords),
+            f"Copied ALL {len(keywords)} keyword(s).",
+        )
+
+    def _delete_selected_rows_with_confirm(self):
+        rows = self._require_selected_rows()
+        if not rows:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete Rows",
+            f"Delete {len(rows)} selected row(s)?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
             return
         for row in reversed(rows):
             self.trends_table.removeRow(row)
         self._refresh_sparklines()
-        self.t_status.setText(f"Total Items: {self.trends_table.rowCount()}")
+        self._refresh_status_label()
+        self._show_status_message(f"Deleted {len(rows)} row(s).")
 
     def _toggle_row_selection(self):
         rows = self._selected_trend_rows()
         if not rows:
-            self.trends_table.selectAll()
+            self._warn_select_rows()
             return
-        all_selected = len(rows) == self.trends_table.rowCount()
-        if all_selected:
-            self.trends_table.clearSelection()
-        else:
-            self.trends_table.selectAll()
+
+        all_checked = True
+        for row in rows:
+            item = self.trends_table.item(row, 0)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                all_checked = False
+                break
+
+        new_state = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
+        for row in rows:
+            item = self.trends_table.item(row, 0)
+            if item is None:
+                continue
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsEnabled
+            )
+            item.setCheckState(new_state)
+
+        state_text = "Checked" if new_state == Qt.CheckState.Checked else "Unchecked"
+        self._show_status_message(f"{state_text} {len(rows)} row(s).")
 
     def _focus_search_input(self):
         self.trends_input.setFocus()
@@ -1110,37 +1256,127 @@ class TrendsTab(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(
             """
-            QMenu { background-color: #2b2b2b; color: #ffffff; border: 1px solid #444444; }
-            QMenu::item { padding: 8px 24px; }
-            QMenu::item:selected { background-color: #e50914; color: #ffffff; }
+            QMenu {
+                background-color: #f4f4f4;
+                color: #222222;
+                border: 1px solid #a8a8a8;
+            }
+            QMenu::item {
+                padding: 6px 26px;
+                margin: 1px 4px;
+            }
+            QMenu::item:selected {
+                background-color: #f1d5df;
+                color: #111111;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #d0d0d0;
+                margin: 4px 8px;
+            }
             """
         )
 
-        action_video = menu.addAction("Send to Video search tool")
-        action_channel = menu.addAction("Send to Channel search tool")
-        action_volume = menu.addAction("Get Search Volume")
-        menu.addSeparator()
-        action_ke_selected = menu.addAction("Send SELECTED to Keywords Everywhere tool")
-        action_ke_all = menu.addAction("Send ALL to Keywords Everywhere tool")
-        menu.addSeparator()
-        action_checkboxes = menu.addAction("Checkboxes")
-        action_filters = menu.addAction("Filters")
-        action_copy = menu.addAction("Copy")
-        action_hashtags = menu.addAction("Hashtags")
-        action_search = menu.addAction("Search")
-        action_delete = menu.addAction("Delete")
+        self._add_context_action(
+            menu,
+            "Send to Video search tool",
+            self._send_to_video_search_tool,
+            QStyle.StandardPixmap.SP_MediaPlay,
+        )
+        self._add_context_action(
+            menu,
+            "Send to Channel search tool",
+            self._send_to_channel_search_tool,
+            QStyle.StandardPixmap.SP_FileDialogInfoView,
+        )
+        self._add_context_action(
+            menu,
+            "Get Search Volume",
+            self._get_search_volume_for_selected,
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
+        )
+        self._add_context_action(
+            menu,
+            "Send SELECTED to Keywords Everywhere tool",
+            self._send_selected_to_keywords_everywhere,
+            QStyle.StandardPixmap.SP_ArrowForward,
+        )
+        self._add_context_action(
+            menu,
+            "Send ALL to Keywords Everywhere tool",
+            self._send_all_to_keywords_everywhere,
+            QStyle.StandardPixmap.SP_CommandLink,
+        )
+        self._add_context_action(
+            menu,
+            "Checkboxes",
+            self._toggle_row_selection,
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+        )
+        self._add_context_action(
+            menu,
+            "Filters",
+            self._show_next_steps_message,
+            QStyle.StandardPixmap.SP_DialogResetButton,
+        )
 
-        action_video.triggered.connect(lambda: self._show_placeholder_action("Send to Video search tool"))
-        action_channel.triggered.connect(lambda: self._show_placeholder_action("Send to Channel search tool"))
-        action_volume.triggered.connect(lambda: self._show_placeholder_action("Get Search Volume"))
-        action_ke_selected.triggered.connect(self._send_ke_selected)
-        action_ke_all.triggered.connect(self._send_ke_all)
-        action_checkboxes.triggered.connect(self._toggle_row_selection)
-        action_filters.triggered.connect(lambda: self._show_placeholder_action("Filters"))
-        action_copy.triggered.connect(self._copy_selected_keywords)
-        action_hashtags.triggered.connect(lambda: self._show_placeholder_action("Hashtags"))
-        action_search.triggered.connect(self._focus_search_input)
-        action_delete.triggered.connect(self._delete_selected_rows)
+        menu.addSeparator()
+
+        copy_menu = QMenu("Copy", menu)
+        copy_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        copy_items = [
+            "Copy SELECTED rows to clipboard",
+            "Copy ALL rows to clipboard",
+            "Copy HIGHLIGHTED items to clipboard",
+            "Copy SELECTED keywords to clipboard",
+            "Copy ALL keywords to clipboard",
+            "Copy SELECTED comma separated keywords to clipboard",
+            "Copy ALL comma separated keywords to clipboard",
+        ]
+        copy_handlers = [
+            self._copy_selected_rows_to_clipboard,
+            self._copy_all_rows_to_clipboard,
+            self._copy_highlighted_items_to_clipboard,
+            lambda: self._copy_selected_keywords_to_clipboard(comma_separated=False),
+            lambda: self._copy_all_keywords_to_clipboard(comma_separated=False),
+            lambda: self._copy_selected_keywords_to_clipboard(comma_separated=True),
+            lambda: self._copy_all_keywords_to_clipboard(comma_separated=True),
+        ]
+        for label, handler in zip(copy_items, copy_handlers):
+            sub_action = copy_menu.addAction(label)
+            sub_action.triggered.connect(lambda _checked=False, cb=handler: cb())
+        menu.addMenu(copy_menu)
+
+        hashtags_menu = QMenu("Hashtags", menu)
+        hashtags_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        hash_action = hashtags_menu.addAction("Hashtags options")
+        hash_action.triggered.connect(lambda _checked=False: self._show_next_steps_message())
+        menu.addMenu(hashtags_menu)
+
+        self._add_context_action(
+            menu,
+            "Search",
+            self._show_next_steps_message,
+            QStyle.StandardPixmap.SP_FileDialogContentsView,
+        )
+        self._add_context_action(
+            menu,
+            "Auto-fit column widths",
+            self._show_next_steps_message,
+            QStyle.StandardPixmap.SP_TitleBarShadeButton,
+        )
+        self._add_context_action(
+            menu,
+            "Reset column widths",
+            self._show_next_steps_message,
+            QStyle.StandardPixmap.SP_BrowserReload,
+        )
+        self._add_context_action(
+            menu,
+            "Delete",
+            self._delete_selected_rows_with_confirm,
+            QStyle.StandardPixmap.SP_TrashIcon,
+        )
 
         menu.exec(self.trends_table.viewport().mapToGlobal(pos))
 
