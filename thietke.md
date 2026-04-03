@@ -1,6 +1,7 @@
 # TubeVibe - Thiet Ke Tong Hop (UI + Chuc Nang + Step)
 
 Tai lieu nay gom cac diem da phan tich va roadmap chi tiet de code tung buoc, tranh sot chuc nang.
+Tai lieu chi tiet rieng cho tab Videos nam o: `stepvideotab.md`.
 
 ## 1) Nguon tham chieu
 - Tube Atlas website: https://tubeatlas.com.vn/
