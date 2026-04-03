@@ -1,5 +1,5 @@
 from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPixmap
+from PyQt6.QtGui import QColor, QFont, QPixmap, QTextOption
 from PyQt6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -25,12 +26,19 @@ from PyQt6.QtWidgets import (
     QHeaderView,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+import os
 import webbrowser
 import re
 from collections import Counter
 from urllib.parse import parse_qs, urlparse
 
-from core.videos_fetcher import ImportedLinksMetadataWorker, TrendingVideosWorker, VideoSearchWorker
+from core.videos_fetcher import (
+    ImportedLinksMetadataWorker,
+    TrendingVideosWorker,
+    VideoDownloadWorker,
+    VideoSearchWorker,
+    fetch_video_page_details,
+)
 from utils.constants import REQUESTS_INSTALLED
 
 try:
@@ -78,6 +86,28 @@ class ThumbnailFallbackWorker(QThread):
                 last_error = str(exc).strip() or "thumbnail download failed"
 
         self.finished_signal.emit(self.request_url, b"", last_error)
+
+
+class VideoDetailsWorker(QThread):
+    details_signal = pyqtSignal(dict)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, video_id="", video_link="", proxy_url=""):
+        super().__init__()
+        self.video_id = str(video_id or "").strip()
+        self.video_link = str(video_link or "").strip()
+        self.proxy_url = str(proxy_url or "").strip()
+
+    def run(self):
+        try:
+            details = fetch_video_page_details(
+                video_id=self.video_id,
+                video_link=self.video_link,
+                proxy_url=self.proxy_url,
+            )
+            self.details_signal.emit(details)
+        except Exception as exc:
+            self.error_signal.emit(str(exc).strip() or "Unable to load full video details.")
 
 
 class VideosFilterDialog(QDialog):
@@ -277,6 +307,184 @@ class VideosAnalyzeDialog(QDialog):
         )
 
 
+class VideoDetailsDialog(QDialog):
+    def __init__(self, parent=None, video_data=None):
+        super().__init__(parent)
+        self.setWindowTitle("Video Details")
+        self.setModal(True)
+        self.resize(920, 620)
+        data = dict(video_data or {})
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(14)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(10)
+
+        title = QLabel(data.get("Title", "") or "(No title)")
+        title.setWordWrap(True)
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        title.setStyleSheet("QLabel { color:#ffffff; font-size:22px; font-weight:700; }")
+        text_col.addWidget(title)
+        self.lbl_title = title
+
+        meta_frame = QFrame()
+        meta_frame.setStyleSheet("QFrame { background:#11151f; border:1px solid #2f3444; border-radius:8px; }")
+        meta_layout = QVBoxLayout(meta_frame)
+        meta_layout.setContentsMargins(12, 10, 12, 10)
+        meta_layout.setSpacing(6)
+        self._meta_labels = {}
+        for label in (
+            "Video ID",
+            "Video Link",
+            "Thumbnail URL",
+            "Source",
+            "Search Phrase",
+            "Channel Name",
+            "Channel ID",
+            "Channel URL",
+            "View Count",
+            "Length Seconds",
+            "Publish Date",
+            "Upload Date",
+            "Category",
+            "Title Length",
+            "Description Length",
+        ):
+            row = QLabel()
+            row.setTextFormat(Qt.TextFormat.RichText)
+            row.setWordWrap(True)
+            row.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            row.setStyleSheet("QLabel { color:#dbe4ee; font-size:13px; }")
+            meta_layout.addWidget(row)
+            self._meta_labels[label] = row
+        text_col.addWidget(meta_frame, stretch=1)
+        top_row.addLayout(text_col, stretch=1)
+
+        thumb_frame = QFrame()
+        thumb_frame.setMinimumWidth(280)
+        thumb_frame.setMaximumWidth(320)
+        thumb_frame.setStyleSheet("QFrame { background:#11151f; border:1px solid #2f3444; border-radius:8px; }")
+        thumb_layout = QVBoxLayout(thumb_frame)
+        thumb_layout.setContentsMargins(12, 12, 12, 12)
+        thumb_layout.setSpacing(8)
+        thumb_title = QLabel("Thumbnail Preview")
+        thumb_title.setStyleSheet("QLabel { color:#ffffff; font-size:14px; font-weight:700; }")
+        thumb_layout.addWidget(thumb_title)
+
+        self.thumb_label = QLabel()
+        self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_label.setMinimumHeight(160)
+        self.thumb_label.setStyleSheet("QLabel { background:#0f131b; border:1px solid #2f3444; border-radius:6px; color:#8a94a6; }")
+        thumb_layout.addWidget(self.thumb_label, stretch=1)
+        top_row.addWidget(thumb_frame)
+
+        root.addLayout(top_row)
+
+        lbl_desc = QLabel("Description")
+        lbl_desc.setStyleSheet("QLabel { color:#ffffff; font-size:15px; font-weight:700; }")
+        root.addWidget(lbl_desc)
+
+        self.text_desc = QTextEdit()
+        self.text_desc.setReadOnly(True)
+        self.text_desc.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.text_desc.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.text_desc.setPlainText(data.get("Description", "") or "")
+        self.text_desc.setStyleSheet(
+            "QTextEdit { background:#0f131b; color:#f8fafc; border:1px solid #2f3444; border-radius:8px; padding:10px; }"
+        )
+        root.addWidget(self.text_desc, stretch=1)
+
+        btn_open = QPushButton("Open Video")
+        btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_open.setStyleSheet(
+            "QPushButton { background-color:#2d3342; color:#ffffff; border:none; border-radius:4px; padding:8px 16px; font-weight:700; }"
+            "QPushButton:hover { background-color:#3c4356; }"
+        )
+        btn_open.clicked.connect(lambda: webbrowser.open_new_tab(str(data.get("Video Link", "")).strip()))
+        btn_open.setEnabled(bool(str(data.get("Video Link", "")).strip()))
+
+        btn_copy = QPushButton("Copy Link")
+        btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_copy.setStyleSheet(
+            "QPushButton { background-color:#2d3342; color:#ffffff; border:none; border-radius:4px; padding:8px 16px; font-weight:700; }"
+            "QPushButton:hover { background-color:#3c4356; }"
+        )
+        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText(str(data.get("Video Link", "")).strip()))
+
+        btn_close = QPushButton("Close")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet(
+            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:8px 16px; font-weight:700; }"
+            "QPushButton:hover { background-color:#ff1a25; }"
+        )
+        btn_close.clicked.connect(self.accept)
+
+        row_btn = QHBoxLayout()
+        row_btn.addWidget(btn_open)
+        row_btn.addWidget(btn_copy)
+        row_btn.addStretch()
+        row_btn.addWidget(btn_close)
+        root.addLayout(row_btn)
+
+        self.setStyleSheet("QDialog { background-color:#181b22; color:#f3f4f6; }")
+        self._populate_from_data(data)
+
+    def _set_thumb_pixmap(self, pixmap):
+        if isinstance(pixmap, QPixmap) and not pixmap.isNull():
+            self.thumb_label.setPixmap(
+                pixmap.scaled(
+                    280,
+                    160,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self.thumb_label.setText("")
+        else:
+            self.thumb_label.setPixmap(QPixmap())
+            self.thumb_label.setText("No thumbnail preview")
+
+    def _populate_from_data(self, data):
+        title_text = str(data.get("Title", "") or "(No title)")
+        desc_text = str(data.get("Description", "") or "")
+        self.lbl_title.setText(title_text)
+
+        values = {
+            "Video ID": data.get("Video ID", ""),
+            "Video Link": data.get("Video Link", ""),
+            "Thumbnail URL": data.get("Thumbnail URL", ""),
+            "Source": data.get("Source", ""),
+            "Search Phrase": data.get("Search Phrase", ""),
+            "Channel Name": data.get("Channel Name", ""),
+            "Channel ID": data.get("Channel ID", ""),
+            "Channel URL": data.get("Channel URL", ""),
+            "View Count": data.get("View Count", ""),
+            "Length Seconds": data.get("Length Seconds", ""),
+            "Publish Date": data.get("Publish Date", ""),
+            "Upload Date": data.get("Upload Date", ""),
+            "Category": data.get("Category", ""),
+            "Title Length": f"{len(title_text)} chars",
+            "Description Length": f"{len(desc_text)} chars",
+        }
+        for label, widget in self._meta_labels.items():
+            safe_value = str(values.get(label, "") or "").strip() or "-"
+            widget.setText(f"<b>{label}:</b> {safe_value}")
+
+        self.text_desc.setPlainText(desc_text)
+        self._set_thumb_pixmap(data.get("Thumbnail Pixmap"))
+
+    def apply_loaded_details(self, details, thumb_pixmap=None):
+        merged = dict(details or {})
+        if thumb_pixmap is not None:
+            merged["Thumbnail Pixmap"] = thumb_pixmap
+        self._populate_from_data(merged)
+
+
 class VideosTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -286,6 +494,7 @@ class VideosTab(QWidget):
         self._search_worker = None
         self._trending_worker = None
         self._import_worker = None
+        self._download_worker = None
         self._invalid_import_count = 0
         self._invalid_import_rows = []
         self._all_rows_cache = []
@@ -722,13 +931,22 @@ class VideosTab(QWidget):
             self.main_window.statusBar().showMessage(message, 5000)
 
     def _set_search_running(self, running):
-        self.btn_search.setEnabled(not running)
+        download_running = self._download_worker is not None and self._download_worker.isRunning()
+        self.btn_search.setEnabled((not running) and (not download_running))
         self.btn_stop_search.setEnabled(running)
-        self.btn_trending_videos.setEnabled(not running)
+        self.btn_trending_videos.setEnabled((not running) and (not download_running))
 
     def _set_import_running(self, running):
-        self.btn_get_data.setEnabled(not running)
+        download_running = self._download_worker is not None and self._download_worker.isRunning()
+        self.btn_get_data.setEnabled((not running) and (not download_running))
         self.btn_stop_import.setEnabled(running)
+
+    def _set_download_running(self, running):
+        self.btn_search.setEnabled(not running)
+        self.btn_trending_videos.setEnabled(not running)
+        self.btn_get_data.setEnabled(not running)
+        self.btn_stop_search.setEnabled(running or (self._search_worker is not None and self._search_worker.isRunning()))
+        self.btn_stop_import.setEnabled(running or (self._import_worker is not None and self._import_worker.isRunning()))
 
     def _current_proxy_payload(self):
         if self.main_window is None or not hasattr(self.main_window, "get_proxy_settings"):
@@ -748,6 +966,9 @@ class VideosTab(QWidget):
         query = self.input_search_phrase.text().strip()
         if not query:
             QMessageBox.warning(self, "Videos Tool", "Please enter a search phrase first.")
+            return
+        if self._download_worker is not None and self._download_worker.isRunning():
+            QMessageBox.information(self, "Videos Tool", "Video download is running. Stop it before starting a new search.")
             return
 
         if self._search_worker is not None and self._search_worker.isRunning():
@@ -801,8 +1022,14 @@ class VideosTab(QWidget):
         if self._trending_worker is not None and self._trending_worker.isRunning():
             self._trending_worker.stop()
             self._set_status("Stopping trending load...")
+        if self._download_worker is not None and self._download_worker.isRunning():
+            self._download_worker.stop()
+            self._set_status("Stopping video download...")
 
     def start_trending_videos(self):
+        if self._download_worker is not None and self._download_worker.isRunning():
+            QMessageBox.information(self, "Videos Tool", "Video download is running. Stop it before loading trending videos.")
+            return
         if self._search_worker is not None and self._search_worker.isRunning():
             QMessageBox.information(self, "Videos Tool", "Search is already running.")
             return
@@ -838,6 +1065,9 @@ class VideosTab(QWidget):
         if self._import_worker is not None and self._import_worker.isRunning():
             self._import_worker.stop()
             self._set_status("Stopping import...")
+        if self._download_worker is not None and self._download_worker.isRunning():
+            self._download_worker.stop()
+            self._set_status("Stopping video download...")
 
     @staticmethod
     def _extract_video_id_from_url(url_text):
@@ -901,6 +1131,9 @@ class VideosTab(QWidget):
         return rows, invalid
 
     def import_links_to_table(self):
+        if self._download_worker is not None and self._download_worker.isRunning():
+            QMessageBox.information(self, "Videos Tool", "Video download is running. Stop it before importing links.")
+            return
         if self._import_worker is not None and self._import_worker.isRunning():
             QMessageBox.information(self, "Videos Tool", "Import is already running.")
             return
@@ -1295,6 +1528,22 @@ class VideosTab(QWidget):
                 rows.append(row)
         return rows
 
+    def _set_row_check_state(self, rows, checked):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        changed = 0
+        for row in sorted(set(rows)):
+            item = self.videos_table.item(row, 0)
+            if item is None:
+                continue
+            if item.checkState() != state:
+                item.setCheckState(state)
+                changed += 1
+        if changed:
+            self._update_status_labels()
+
+    def _set_all_check_state(self, checked):
+        self._set_row_check_state(list(range(self.videos_table.rowCount())), checked)
+
     def _selected_rows_from_highlight(self):
         if self.videos_table.selectionModel() is None:
             return []
@@ -1315,6 +1564,165 @@ class VideosTab(QWidget):
         if text.startswith("http://") or text.startswith("https://"):
             return text
         return ""
+
+    def _row_payload(self, row):
+        if row < 0 or row >= self.videos_table.rowCount():
+            return {}
+        thumb_item = self.videos_table.item(row, 1)
+        thumb_url = thumb_item.toolTip().strip() if thumb_item is not None else ""
+        thumb_pixmap = self._thumbnail_cache.get(thumb_url)
+        if thumb_pixmap is None and thumb_item is not None:
+            thumb_pixmap = thumb_item.data(Qt.ItemDataRole.DecorationRole)
+        return {
+            "Video ID": self.videos_table.item(row, 2).text().strip() if self.videos_table.item(row, 2) else "",
+            "Video Link": self.videos_table.item(row, 3).text().strip() if self.videos_table.item(row, 3) else "",
+            "Source": self.videos_table.item(row, 4).text().strip() if self.videos_table.item(row, 4) else "",
+            "Search Phrase": self.videos_table.item(row, 5).text().strip() if self.videos_table.item(row, 5) else "",
+            "Title": self.videos_table.item(row, 6).text().strip() if self.videos_table.item(row, 6) else "",
+            "Description": self.videos_table.item(row, 7).text().strip() if self.videos_table.item(row, 7) else "",
+            "Thumbnail URL": thumb_url,
+            "Thumbnail Pixmap": thumb_pixmap,
+        }
+
+    def _collect_video_payloads(self, rows):
+        payloads = []
+        for row in sorted(set(rows)):
+            data = self._row_payload(row)
+            if data:
+                payloads.append(data)
+        return payloads
+
+    def _require_rows(self, rows, feature_name):
+        if rows:
+            return True
+        QMessageBox.warning(self, "Videos Tool", f"Please select at least one row for {feature_name}.")
+        return False
+
+    def _send_selected_video_to_comments_tool(self, rows):
+        if not self._require_rows(rows, "Comments tool"):
+            return
+        links = [row.get("Video Link", "") for row in self._collect_video_payloads(rows) if row.get("Video Link", "")]
+        if not links:
+            QMessageBox.warning(self, "Videos Tool", "No valid video links found in the selected rows.")
+            return
+        if self.main_window.handle_send_videos_to_comments(links):
+            self._set_status(f"Sent {len(links)} video link(s) to Comments tool.")
+
+    def _send_to_channel_tool(self, rows, all_rows=False):
+        if not all_rows and not self._require_rows(rows, "Channel tool"):
+            return
+        target_rows = list(range(self.videos_table.rowCount())) if all_rows else rows
+        payloads = self._collect_video_payloads(target_rows)
+        if not payloads:
+            QMessageBox.warning(self, "Videos Tool", "No rows available to send to Channel tool.")
+            return
+        label = "ALL rows from Videos tool" if all_rows else "SELECTED rows from Videos tool"
+        if self.main_window.handle_send_videos_to_channels(payloads, source_label=label):
+            self._set_status(f"Sent {len(payloads)} item(s) to Channel tool.")
+
+    def _convert_selected_video_to_text(self, rows):
+        if not self._require_rows(rows, "Video to Text"):
+            return
+        links = [row.get("Video Link", "") for row in self._collect_video_payloads(rows) if row.get("Video Link", "")]
+        if not links:
+            QMessageBox.warning(self, "Videos Tool", "No valid video links found in the selected rows.")
+            return
+        if self.main_window.handle_send_videos_to_text(links):
+            self._set_status(f"Sent {len(links)} video link(s) to Video to Text.")
+
+    def _show_video_details_for_row(self, row):
+        data = self._row_payload(row)
+        if not data:
+            QMessageBox.warning(self, "Videos Tool", "Please choose a video row first.")
+            return
+        dlg = VideoDetailsDialog(self, video_data=data)
+        proxy_payload = self._current_proxy_payload()
+        proxy_url = proxy_payload["proxies"][0] if proxy_payload.get("enabled") and proxy_payload.get("proxies") else ""
+        worker = VideoDetailsWorker(
+            video_id=data.get("Video ID", ""),
+            video_link=data.get("Video Link", ""),
+            proxy_url=proxy_url,
+        )
+        def _apply(details):
+            merged = dict(data)
+            merged.update({k: v for k, v in (details or {}).items() if str(v or "").strip()})
+            thumb_url = str(merged.get("Thumbnail URL", "")).strip()
+            thumb_pixmap = self._thumbnail_cache.get(thumb_url) if thumb_url else None
+            dlg.apply_loaded_details(merged, thumb_pixmap=thumb_pixmap)
+        worker.details_signal.connect(_apply)
+        worker.error_signal.connect(lambda _msg: None)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        dlg._details_worker = worker
+        dlg.exec()
+
+    def _download_selected_videos(self, rows):
+        if not self._require_rows(rows, "Download video"):
+            return
+        if self._download_worker is not None and self._download_worker.isRunning():
+            QMessageBox.information(self, "Videos Tool", "A video download is already running.")
+            return
+
+        payloads = [row for row in self._collect_video_payloads(rows) if row.get("Video Link", "")]
+        if not payloads:
+            QMessageBox.warning(self, "Videos Tool", "No valid video links found in the selected rows.")
+            return
+
+        default_dir = os.path.join(os.path.expanduser("~"), "Downloads", "TubeVibe Videos")
+        target_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Download Folder",
+            default_dir,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not target_dir:
+            return
+
+        proxy_payload = self._current_proxy_payload()
+        proxy_url = proxy_payload["proxies"][0] if proxy_payload.get("enabled") and proxy_payload.get("proxies") else ""
+
+        self._download_worker = VideoDownloadWorker(
+            video_rows=payloads,
+            output_dir=target_dir,
+            proxy_url=proxy_url,
+        )
+        self._download_worker.status_signal.connect(self._set_status)
+        self._download_worker.error_signal.connect(self._on_search_error)
+        self._download_worker.finished_signal.connect(self._on_download_finished)
+        self._set_download_running(True)
+        self._set_status(
+            f"Starting download for {len(payloads)} video(s) to {target_dir}. Use Stop to cancel."
+        )
+        self._download_worker.start()
+
+    def _on_download_finished(self, result):
+        self._set_download_running(False)
+        total = int((result or {}).get("total", 0))
+        downloaded = int((result or {}).get("downloaded", 0))
+        failed = int((result or {}).get("failed", 0))
+        stopped = bool((result or {}).get("stopped", False))
+        failed_items = list((result or {}).get("failed_items", []))
+
+        if stopped:
+            self._set_status(f"Download stopped. Downloaded {downloaded}/{total} video(s).")
+        else:
+            self._set_status(f"Download finished. Success: {downloaded}, failed: {failed}.")
+
+        if failed_items:
+            preview = []
+            for item in failed_items[:5]:
+                title = str(item.get("title", "")).strip() or "Unknown"
+                error = str(item.get("error", "")).strip() or "Download failed"
+                preview.append(f"- {title}: {error[:140]}")
+            QMessageBox.warning(
+                self,
+                "Download Summary",
+                "\n".join(
+                    [f"Downloaded: {downloaded}/{total}", f"Failed: {failed}"] + preview
+                ),
+            )
+
+        self._download_worker = None
 
     def _open_video_link_for_row(self, row):
         link = self._video_link_for_row(row)
@@ -1393,9 +1801,42 @@ class VideosTab(QWidget):
             "QMenu::item:selected { background-color:#e50914; color:#ffffff; }"
         )
 
-        act_open = menu.addAction("Open Video Link")
-        act_open.triggered.connect(lambda: self._open_video_link_for_row(clicked_row))
-        act_open.setEnabled(clicked_row >= 0)
+        videos_tool_menu = menu.addMenu("Videos tool")
+        act_send_comments = videos_tool_menu.addAction("Send SELECTED video to Comments tool")
+        act_send_comments.triggered.connect(lambda: self._send_selected_video_to_comments_tool(selected_rows))
+        act_send_channel_selected = videos_tool_menu.addAction("Send SELECTED to Channel tool")
+        act_send_channel_selected.triggered.connect(lambda: self._send_to_channel_tool(selected_rows, all_rows=False))
+        act_send_channel_all = videos_tool_menu.addAction("Send ALL to Channel tool")
+        act_send_channel_all.triggered.connect(lambda: self._send_to_channel_tool(selected_rows, all_rows=True))
+        videos_tool_menu.addSeparator()
+        act_video_details = videos_tool_menu.addAction("View video details")
+        act_video_details.triggered.connect(lambda: self._show_video_details_for_row(clicked_row))
+        act_video_to_text = videos_tool_menu.addAction("Convert SELECTED video to text")
+        act_video_to_text.triggered.connect(lambda: self._convert_selected_video_to_text(selected_rows))
+        act_download_video = videos_tool_menu.addAction("Download video")
+        act_download_video.triggered.connect(lambda: self._download_selected_videos(selected_rows))
+        videos_tool_menu.addSeparator()
+        act_analyze_tags = videos_tool_menu.addAction("Analyze video tags")
+        act_analyze_tags.triggered.connect(lambda: self._show_coming_soon("Analyze video tags"))
+        act_analyze_keywords = videos_tool_menu.addAction("Analyze keywords in video titles")
+        act_analyze_keywords.triggered.connect(lambda: self._show_coming_soon("Analyze keywords in video titles"))
+
+        checkbox_menu = menu.addMenu("Checkboxes")
+        act_check_selected = checkbox_menu.addAction("Check SELECTED rows")
+        act_check_selected.triggered.connect(lambda: self._set_row_check_state(selected_rows, True))
+        act_uncheck_selected = checkbox_menu.addAction("Uncheck SELECTED rows")
+        act_uncheck_selected.triggered.connect(lambda: self._set_row_check_state(selected_rows, False))
+        checkbox_menu.addSeparator()
+        act_check_all = checkbox_menu.addAction("Check ALL rows")
+        act_check_all.triggered.connect(lambda: self._set_all_check_state(True))
+        act_uncheck_all = checkbox_menu.addAction("Uncheck ALL rows")
+        act_uncheck_all.triggered.connect(lambda: self._set_all_check_state(False))
+
+        filters_menu = menu.addMenu("Filters")
+        act_filters = filters_menu.addAction("Open Filters")
+        act_filters.triggered.connect(self.open_filters_dialog)
+        act_reset_filters = filters_menu.addAction("Reset Filters")
+        act_reset_filters.triggered.connect(self.reset_video_filters)
 
         copy_menu = menu.addMenu("Copy")
         act_copy_selected = copy_menu.addAction("Copy SELECTED rows")
@@ -1412,26 +1853,27 @@ class VideosTab(QWidget):
             lambda: self._copy_rows_to_clipboard(list(range(self.videos_table.rowCount())), links_only=True)
         )
 
-        menu.addSeparator()
-        act_delete_selected = menu.addAction("Delete SELECTED rows")
-        act_delete_selected.triggered.connect(lambda: self._delete_rows(selected_rows))
-        act_delete_all = menu.addAction("Delete ALL rows")
-        act_delete_all.triggered.connect(lambda: self._delete_rows(list(range(self.videos_table.rowCount()))))
-        menu.addSeparator()
-        act_filters = menu.addAction("Filters...")
-        act_filters.triggered.connect(self.open_filters_dialog)
-        act_reset_filters = menu.addAction("Reset Filters")
-        act_reset_filters.triggered.connect(self.reset_video_filters)
-        menu.addSeparator()
-        act_search = menu.addAction("Search...")
+        act_search = menu.addAction("Search")
         act_search.triggered.connect(self.open_table_search_dialog)
-        act_clear_search = menu.addAction("Clear Search Highlight")
-        act_clear_search.triggered.connect(self._reset_table_search_state)
+
+        preview_menu = menu.addMenu("Preview")
+        act_open = preview_menu.addAction("Open Video Link")
+        act_open.triggered.connect(lambda: self._open_video_link_for_row(clicked_row))
+        act_open.setEnabled(clicked_row >= 0)
+        act_preview_details = preview_menu.addAction("Quick preview")
+        act_preview_details.triggered.connect(lambda: self._show_coming_soon("Quick preview"))
+
         menu.addSeparator()
         act_auto_fit = menu.addAction("Auto-fit column widths")
         act_auto_fit.triggered.connect(self.auto_fit_column_widths)
         act_reset_columns = menu.addAction("Reset column widths")
         act_reset_columns.triggered.connect(self.reset_column_widths)
+
+        delete_menu = menu.addMenu("Delete")
+        act_delete_selected = delete_menu.addAction("Delete SELECTED rows")
+        act_delete_selected.triggered.connect(lambda: self._delete_rows(selected_rows))
+        act_delete_all = delete_menu.addAction("Delete ALL rows")
+        act_delete_all.triggered.connect(lambda: self._delete_rows(list(range(self.videos_table.rowCount()))))
 
         menu.exec(self.videos_table.viewport().mapToGlobal(position))
 

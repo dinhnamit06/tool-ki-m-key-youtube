@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from html import unescape
@@ -15,6 +16,11 @@ try:
 except ImportError:  # pragma: no cover
     requests = None
 
+try:
+    import yt_dlp
+except ImportError:  # pragma: no cover
+    yt_dlp = None
+
 
 def _response_text_utf8(response) -> str:
     try:
@@ -24,6 +30,258 @@ def _response_text_utf8(response) -> str:
     except Exception:
         pass
     return str(getattr(response, "text", "") or "")
+
+
+def _default_video_row() -> Dict[str, str]:
+    return {
+        "Rating": "not-given",
+        "Comments": "not-given",
+        "Length Seconds": "not-given",
+        "Published": "not-given",
+        "Published Age (Days)": "not-given",
+        "Avg. Views per Day": "not-given",
+        "Category": "not-given",
+        "Subtitles": "not-given",
+        "Channel": "",
+        "Channel Link": "",
+        "Subscribers": "not-given",
+        "Tags": "",
+    }
+
+
+def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url: str = "") -> Dict[str, str]:
+    details: Dict[str, str] = {}
+    video_key = str(video_id or "").strip()
+    watch_url = str(video_link or "").strip()
+    if not video_key and "watch?v=" in watch_url:
+        parsed = re.search(r"[?&]v=([^&]+)", watch_url)
+        if parsed:
+            video_key = str(parsed.group(1)).strip()
+
+    if not REQUESTS_INSTALLED or requests is None:
+        return details
+    if not video_key and not watch_url:
+        return details
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    proxies = None
+    normalized_proxy = normalize_proxy(proxy_url)
+    if normalized_proxy:
+        proxies = to_requests_proxies(normalized_proxy)
+
+    if video_key:
+        response = requests.get(
+            "https://www.youtube.com/watch",
+            params={"v": video_key, "hl": "en"},
+            headers=headers,
+            timeout=25,
+            proxies=proxies,
+        )
+    else:
+        response = requests.get(
+            watch_url,
+            headers=headers,
+            timeout=25,
+            proxies=proxies,
+        )
+    response.raise_for_status()
+    page_html = _response_text_utf8(response)
+
+    marker = "var ytInitialPlayerResponse = "
+    blob = VideoSearchWorker._extract_json_blob(page_html, marker)
+    if not blob:
+        marker = 'window["ytInitialPlayerResponse"] = '
+        blob = VideoSearchWorker._extract_json_blob(page_html, marker)
+    if not blob:
+        return details
+
+    player = json.loads(blob)
+    video_details = player.get("videoDetails", {}) if isinstance(player, dict) else {}
+    microformat = (
+        player.get("microformat", {}).get("playerMicroformatRenderer", {})
+        if isinstance(player, dict)
+        else {}
+    )
+
+    title = str(video_details.get("title", "")).strip()
+    description = str(video_details.get("shortDescription", "")).strip()
+    author = str(video_details.get("author", "")).strip()
+    channel_id = str(video_details.get("channelId", "")).strip()
+    view_count = str(video_details.get("viewCount", "")).strip()
+    length_seconds = str(video_details.get("lengthSeconds", "")).strip()
+    publish_date = str(microformat.get("publishDate", "")).strip()
+    upload_date = str(microformat.get("uploadDate", "")).strip()
+    category = str(microformat.get("category", "")).strip()
+    owner_url = str(microformat.get("ownerProfileUrl", "")).strip()
+
+    thumb_url = ""
+    thumbs = video_details.get("thumbnail", {}).get("thumbnails", [])
+    if isinstance(thumbs, list) and thumbs:
+        last = thumbs[-1] if isinstance(thumbs[-1], dict) else {}
+        thumb_url = VideoSearchWorker._normalize_thumbnail_url(str(last.get("url", "")).strip(), video_key)
+
+    details.update(
+        {
+            "Title": title,
+            "Description": description,
+            "Channel Name": author,
+            "Channel ID": channel_id,
+            "Channel URL": owner_url or (f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""),
+            "View Count": view_count,
+            "Length Seconds": length_seconds,
+            "Publish Date": publish_date,
+            "Upload Date": upload_date,
+            "Category": category,
+            "Thumbnail URL": thumb_url,
+        }
+    )
+    return details
+
+
+class _DownloadStopped(Exception):
+    pass
+
+
+class VideoDownloadWorker(QThread):
+    status_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, video_rows: List[dict], output_dir: str, proxy_url: str = ""):
+        super().__init__()
+        self.video_rows = [dict(row) for row in (video_rows or []) if isinstance(row, dict)]
+        self.output_dir = str(output_dir or "").strip()
+        self.proxy_url = str(proxy_url or "").strip()
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def _progress_hook_factory(self, title: str, index: int, total: int):
+        def _hook(progress):
+            if not self._running:
+                raise _DownloadStopped()
+            status = str(progress.get("status", "")).strip().lower()
+            if status == "downloading":
+                percent = str(progress.get("_percent_str", "")).strip()
+                speed = str(progress.get("_speed_str", "")).strip()
+                eta = str(progress.get("_eta_str", "")).strip()
+                parts = [f"Downloading {index}/{total}: {title}"]
+                if percent:
+                    parts.append(percent)
+                if speed:
+                    parts.append(speed)
+                if eta:
+                    parts.append(f"ETA {eta}")
+                self.status_signal.emit(" | ".join(parts))
+            elif status == "finished":
+                self.status_signal.emit(f"Processing downloaded file {index}/{total}: {title}")
+
+        return _hook
+
+    def _ydl_options(self, title: str, index: int, total: int):
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "outtmpl": os.path.join(self.output_dir, "%(title).150B [%(id)s].%(ext)s"),
+            "windowsfilenames": True,
+            "restrictfilenames": False,
+            "progress_hooks": [self._progress_hook_factory(title, index, total)],
+            "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
+            "merge_output_format": "mp4",
+        }
+        if self.proxy_url:
+            options["proxy"] = self.proxy_url
+        return options
+
+    def _download_one(self, row: dict, index: int, total: int):
+        link = str(row.get("Video Link", "")).strip()
+        title = str(row.get("Title", "")).strip() or str(row.get("Video ID", "")).strip() or f"video-{index}"
+        if not link:
+            return {"ok": False, "title": title, "error": "Missing video link"}
+        if yt_dlp is None:
+            return {"ok": False, "title": title, "error": "yt-dlp is not installed"}
+
+        try:
+            with yt_dlp.YoutubeDL(self._ydl_options(title, index, total)) as ydl:
+                ydl.download([link])
+            return {"ok": True, "title": title}
+        except _DownloadStopped:
+            raise
+        except Exception as exc:
+            first_error = str(exc).strip() or "Download failed"
+            # Fallback for systems without ffmpeg or when adaptive merge fails.
+            try:
+                fallback_opts = self._ydl_options(title, index, total)
+                fallback_opts["format"] = "best[ext=mp4]/best"
+                fallback_opts.pop("merge_output_format", None)
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    ydl.download([link])
+                return {"ok": True, "title": title}
+            except _DownloadStopped:
+                raise
+            except Exception as fallback_exc:
+                second_error = str(fallback_exc).strip() or first_error
+                return {"ok": False, "title": title, "error": second_error}
+
+    def run(self):
+        if not self.video_rows:
+            self.error_signal.emit("No videos selected for download.")
+            self.finished_signal.emit({"total": 0, "downloaded": 0, "failed": 0, "stopped": False})
+            return
+        if yt_dlp is None:
+            self.error_signal.emit("yt-dlp is not installed. Run: pip install yt-dlp")
+            self.finished_signal.emit({"total": len(self.video_rows), "downloaded": 0, "failed": len(self.video_rows), "stopped": False})
+            return
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        total = len(self.video_rows)
+        downloaded = 0
+        failures = []
+
+        try:
+            for index, row in enumerate(self.video_rows, start=1):
+                if not self._running:
+                    raise _DownloadStopped()
+                title = str(row.get("Title", "")).strip() or str(row.get("Video ID", "")).strip() or f"video-{index}"
+                self.status_signal.emit(f"Preparing download {index}/{total}: {title}")
+                result = self._download_one(row, index, total)
+                if result.get("ok"):
+                    downloaded += 1
+                    self.status_signal.emit(f"Downloaded {index}/{total}: {title}")
+                else:
+                    failures.append(result)
+                    self.error_signal.emit(f"{title}: {result.get('error', 'Download failed')}")
+        except _DownloadStopped:
+            self.status_signal.emit("Video download stopped.")
+            self.finished_signal.emit(
+                {
+                    "total": total,
+                    "downloaded": downloaded,
+                    "failed": len(failures),
+                    "failed_items": failures,
+                    "stopped": True,
+                }
+            )
+            return
+
+        self.finished_signal.emit(
+            {
+                "total": total,
+                "downloaded": downloaded,
+                "failed": len(failures),
+                "failed_items": failures,
+                "stopped": False,
+            }
+        )
 
 
 class VideoSearchWorker(QThread):

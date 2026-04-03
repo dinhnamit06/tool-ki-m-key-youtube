@@ -1,7 +1,7 @@
 import os
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QStackedWidget, QSizePolicy
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QStackedWidget, QSizePolicy, QTextEdit
 )
 from PyQt6.QtCore import Qt
 
@@ -10,6 +10,37 @@ from ui.trends_tab import TrendsTab
 from ui.videos_tab import VideosTab
 from utils.constants import MAIN_STYLE
 from utils.proxy_utils import normalize_proxy
+
+
+class ToolInboxPage(QWidget):
+    def __init__(self, title, hint_text=""):
+        super().__init__()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 28, 28, 28)
+        root.setSpacing(16)
+
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet("QLabel { color:#ffffff; font-size:28px; font-weight:700; }")
+        root.addWidget(lbl_title)
+
+        self.lbl_hint = QLabel(hint_text)
+        self.lbl_hint.setWordWrap(True)
+        self.lbl_hint.setStyleSheet("QLabel { color:#cbd5e1; font-size:14px; }")
+        root.addWidget(self.lbl_hint)
+
+        self.text_payload = QTextEdit()
+        self.text_payload.setReadOnly(True)
+        self.text_payload.setPlaceholderText("Incoming data will appear here.")
+        self.text_payload.setStyleSheet(
+            "QTextEdit { background:#11151f; color:#f8fafc; border:1px solid #2f3444; "
+            "border-radius:8px; padding:12px; font-size:14px; }"
+        )
+        root.addWidget(self.text_payload, stretch=1)
+
+    def receive_payload(self, text, hint_text=""):
+        self.text_payload.setPlainText(str(text or "").strip())
+        if hint_text:
+            self.lbl_hint.setText(str(hint_text))
 
 class TubeVibeApp(QMainWindow):
     def __init__(self):
@@ -59,6 +90,9 @@ class TubeVibeApp(QMainWindow):
         self.tab_keywords = KeywordsTab(self)
         self.tab_trends = TrendsTab(self)
         self.tab_videos = VideosTab(self)
+        self.tab_channels = ToolInboxPage("Channels Tool", "Videos or channel seeds sent from other tools will appear here.")
+        self.tab_video_to_text = ToolInboxPage("Video to Text", "Selected video links sent for transcription will appear here.")
+        self.tab_comments = ToolInboxPage("Comments Tool", "Selected video links sent for comment extraction will appear here.")
         
         # Connect signal: Keywords -> Trends data transfer
         self.tab_keywords.send_to_trends_signal.connect(self.handle_send_to_trends)
@@ -67,9 +101,9 @@ class TubeVibeApp(QMainWindow):
         self.main_stack.addWidget(self.tab_keywords)
         self.main_stack.addWidget(self.tab_trends)
         self.main_stack.addWidget(self.tab_videos)
-        # Placeholders for remaining tabs
-        for _ in range(3):
-            self.main_stack.addWidget(QWidget())
+        self.main_stack.addWidget(self.tab_channels)
+        self.main_stack.addWidget(self.tab_video_to_text)
+        self.main_stack.addWidget(self.tab_comments)
         
         self.main_stack.setCurrentIndex(1)
         
@@ -105,6 +139,54 @@ class TubeVibeApp(QMainWindow):
         self.statusBar().showMessage(
             f"Sent {len(keywords)} keywords to Videos tool from {src}.", 4000
         )
+
+    def handle_send_videos_to_comments(self, video_links):
+        links = [str(link).strip() for link in (video_links or []) if str(link).strip()]
+        if not links:
+            return False
+        self.tab_comments.receive_payload(
+            "\n".join(links),
+            f"Received {len(links)} video link(s) from Videos tool.",
+        )
+        self.switch_tab(6)
+        self.statusBar().showMessage(
+            f"Sent {len(links)} video link(s) to Comments tool.", 4000
+        )
+        return True
+
+    def handle_send_videos_to_channels(self, items, source_label="Videos tool"):
+        rows = [dict(row) for row in (items or []) if isinstance(row, dict)]
+        if not rows:
+            return False
+        lines = []
+        for idx, row in enumerate(rows, start=1):
+            lines.append(f"{idx}. {row.get('Title', '').strip()}")
+            lines.append(f"Video Link: {row.get('Video Link', '').strip()}")
+            lines.append(f"Search Phrase: {row.get('Search Phrase', '').strip()}")
+            lines.append("")
+        self.tab_channels.receive_payload(
+            "\n".join(lines).strip(),
+            f"Received {len(rows)} item(s) from {source_label}.",
+        )
+        self.switch_tab(4)
+        self.statusBar().showMessage(
+            f"Sent {len(rows)} item(s) to Channel tool.", 4000
+        )
+        return True
+
+    def handle_send_videos_to_text(self, video_links):
+        links = [str(link).strip() for link in (video_links or []) if str(link).strip()]
+        if not links:
+            return False
+        self.tab_video_to_text.receive_payload(
+            "\n".join(links),
+            f"Received {len(links)} video link(s) from Videos tool.",
+        )
+        self.switch_tab(5)
+        self.statusBar().showMessage(
+            f"Sent {len(links)} video link(s) to Video to Text.", 4000
+        )
+        return True
 
     def get_proxy_settings(self):
         return {
