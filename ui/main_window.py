@@ -5,6 +5,7 @@ from PyQt6.QtCore import Qt
 
 from ui.keywords_tab import KeywordsTab
 from ui.trends_tab import TrendsTab
+from ui.videos_tab import VideosTab
 from utils.constants import MAIN_STYLE
 
 class TubeVibeApp(QMainWindow):
@@ -47,6 +48,7 @@ class TubeVibeApp(QMainWindow):
         self.tab_welcome = QWidget()
         self.tab_keywords = KeywordsTab(self)
         self.tab_trends = TrendsTab(self)
+        self.tab_videos = VideosTab(self)
         
         # Connect signal: Keywords -> Trends data transfer
         self.tab_keywords.send_to_trends_signal.connect(self.handle_send_to_trends)
@@ -54,8 +56,10 @@ class TubeVibeApp(QMainWindow):
         self.main_stack.addWidget(self.tab_welcome)
         self.main_stack.addWidget(self.tab_keywords)
         self.main_stack.addWidget(self.tab_trends)
-        # Placeholders for other tabs
-        for _ in range(4): self.main_stack.addWidget(QWidget())
+        self.main_stack.addWidget(self.tab_videos)
+        # Placeholders for remaining tabs
+        for _ in range(3):
+            self.main_stack.addWidget(QWidget())
         
         self.main_stack.setCurrentIndex(1)
         
