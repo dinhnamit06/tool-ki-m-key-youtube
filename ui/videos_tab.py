@@ -27,7 +27,7 @@ class VideosTab(QWidget):
         self.main_window = main_window
         self._mode = "search"
         self._checkbox_syncing = False
-        self._light_label_style = "QLabel { color: #111111; }"
+        self._dark_label_style = "QLabel { color: #f3f4f6; }"
         self._light_input_style = (
             "QLineEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:5px 8px; }"
             "QLineEdit:focus { border:1px solid #9c9c9c; }"
@@ -37,13 +37,21 @@ class VideosTab(QWidget):
             "QComboBox::drop-down { border: none; width: 20px; }"
             "QComboBox QAbstractItemView { background:#ffffff; color:#111111; border:1px solid #c7c7c7; selection-background-color:#e7e7e7; selection-color:#111111; }"
         )
-        self._light_checkbox_style = "QCheckBox { color:#111111; }"
+        self._dark_checkbox_style = "QCheckBox { color:#f3f4f6; }"
+        self._red_button_style = (
+            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
+            "QPushButton:hover { background-color:#ff1a25; }"
+        )
         self.setup_ui()
 
     def setup_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(24, 18, 24, 18)
+        root.setSpacing(10)
+
+        title = QLabel("Videos Tool")
+        title.setStyleSheet("QLabel { color:#ffffff; font-size:28px; font-weight:700; }")
+        root.addWidget(title)
 
         self._build_mode_bar(root)
         body = QHBoxLayout()
@@ -99,7 +107,7 @@ class VideosTab(QWidget):
         panel = QFrame()
         panel.setMinimumWidth(250)
         panel.setMaximumWidth(270)
-        panel.setStyleSheet("QFrame { background-color: #f3f3f3; border: 1px solid #d0d0d0; }")
+        panel.setStyleSheet("QFrame { background-color: #161922; border: 1px solid #2f3444; border-radius: 6px; }")
         v = QVBoxLayout(panel)
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(10)
@@ -112,7 +120,7 @@ class VideosTab(QWidget):
 
     def _build_search_left_page(self):
         page = QWidget()
-        page.setStyleSheet(self._light_label_style)
+        page.setStyleSheet(self._dark_label_style)
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
@@ -123,10 +131,7 @@ class VideosTab(QWidget):
 
         self.btn_search = QPushButton("Search")
         self.btn_search.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_search.setStyleSheet(
-            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
-            "QPushButton:hover { background-color:#ff1a25; }"
-        )
+        self.btn_search.setStyleSheet(self._red_button_style)
         self.btn_search.clicked.connect(lambda: self._show_coming_soon("Search"))
 
         v.addWidget(QLabel("Search Phrase:"))
@@ -135,7 +140,7 @@ class VideosTab(QWidget):
 
         self.chk_youtube_first = QCheckBox("Youtube (first page results only)")
         self.chk_youtube_first.setChecked(True)
-        self.chk_youtube_first.setStyleSheet(self._light_checkbox_style)
+        self.chk_youtube_first.setStyleSheet(self._dark_checkbox_style)
         v.addWidget(self.chk_youtube_first)
 
         row_sort = QHBoxLayout()
@@ -148,8 +153,8 @@ class VideosTab(QWidget):
 
         self.chk_contains_subtitles = QCheckBox("Contains subtitles")
         self.chk_creative_commons = QCheckBox("Creative Commons License")
-        self.chk_contains_subtitles.setStyleSheet(self._light_checkbox_style)
-        self.chk_creative_commons.setStyleSheet(self._light_checkbox_style)
+        self.chk_contains_subtitles.setStyleSheet(self._dark_checkbox_style)
+        self.chk_creative_commons.setStyleSheet(self._dark_checkbox_style)
         v.addWidget(self.chk_contains_subtitles)
         v.addWidget(self.chk_creative_commons)
 
@@ -158,8 +163,8 @@ class VideosTab(QWidget):
         self.chk_google.setChecked(True)
         self.chk_bing = QCheckBox("Bing")
         self.chk_bing.setChecked(True)
-        self.chk_google.setStyleSheet(self._light_checkbox_style)
-        self.chk_bing.setStyleSheet(self._light_checkbox_style)
+        self.chk_google.setStyleSheet(self._dark_checkbox_style)
+        self.chk_bing.setStyleSheet(self._dark_checkbox_style)
         row_source.addWidget(self.chk_google)
         row_source.addWidget(self.chk_bing)
         row_source.addSpacing(8)
@@ -175,10 +180,7 @@ class VideosTab(QWidget):
         v.addWidget(QLabel("Extract latest trending Youtube videos:"))
         self.btn_trending_videos = QPushButton("Trending Videos")
         self.btn_trending_videos.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_trending_videos.setStyleSheet(
-            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
-            "QPushButton:hover { background-color:#ff1a25; }"
-        )
+        self.btn_trending_videos.setStyleSheet(self._red_button_style)
         self.btn_trending_videos.clicked.connect(lambda: self._show_coming_soon("Trending Videos"))
         v.addWidget(self.btn_trending_videos)
         v.addStretch()
@@ -186,17 +188,14 @@ class VideosTab(QWidget):
 
     def _build_browse_left_page(self):
         page = QWidget()
-        page.setStyleSheet(self._light_label_style)
+        page.setStyleSheet(self._dark_label_style)
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
 
         self.btn_get_data = QPushButton("Get Data")
         self.btn_get_data.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_get_data.setStyleSheet(
-            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
-            "QPushButton:hover { background-color:#ff1a25; }"
-        )
+        self.btn_get_data.setStyleSheet(self._red_button_style)
         self.btn_get_data.clicked.connect(lambda: self._show_coming_soon("Get Data"))
         v.addWidget(self.btn_get_data)
 
@@ -206,10 +205,7 @@ class VideosTab(QWidget):
         self.btn_content_links = QPushButton("Content")
         for btn in (self.btn_browser_links, self.btn_content_links):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:5px 10px; font-weight:600; }"
-                "QPushButton:hover { background-color:#ff1a25; }"
-            )
+            btn.setStyleSheet(self._red_button_style)
         row_type.addWidget(self.btn_browser_links)
         row_type.addWidget(self.btn_content_links)
         v.addLayout(row_type)
@@ -233,7 +229,7 @@ class VideosTab(QWidget):
             "https://www.youtube.com/watch?v=mno345",
         ):
             line = QLabel(sample)
-            line.setStyleSheet("color:#333333;")
+            line.setStyleSheet("color:#1a73e8;")
             links_layout.addWidget(line)
         links_layout.addStretch()
         v.addWidget(self.text_links_block, stretch=1)
@@ -241,7 +237,7 @@ class VideosTab(QWidget):
 
     def _build_right_panel(self):
         panel = QFrame()
-        panel.setStyleSheet("QFrame { background-color: #f8f8f8; border: 1px solid #d0d0d0; }")
+        panel.setStyleSheet("QFrame { background-color: #161922; border: 1px solid #2f3444; border-radius: 6px; }")
         v = QVBoxLayout(panel)
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(6)
@@ -286,13 +282,16 @@ class VideosTab(QWidget):
         slider_row = QHBoxLayout()
         slider_row.setContentsMargins(4, 0, 4, 0)
         slider_row.setSpacing(8)
-        slider_row.addWidget(QLabel("Image Size:"))
+        slider_label = QLabel("Image Size:")
+        slider_label.setStyleSheet("QLabel { color:#f3f4f6; }")
+        slider_row.addWidget(slider_label)
         self.slider_image_size = QSlider(Qt.Orientation.Horizontal)
         self.slider_image_size.setRange(20, 80)
         self.slider_image_size.setValue(25)
         self.slider_image_size.valueChanged.connect(self._on_image_size_changed)
         self.lbl_image_size = QLabel("25 px")
         self.lbl_image_size.setMinimumWidth(44)
+        self.lbl_image_size.setStyleSheet("QLabel { color:#f3f4f6; }")
         slider_row.addWidget(self.slider_image_size, stretch=1)
         slider_row.addWidget(self.lbl_image_size)
         v.addLayout(slider_row)
@@ -303,18 +302,15 @@ class VideosTab(QWidget):
 
         self.lbl_total_items = QLabel("Total Items: 0")
         self.lbl_selected_rows = QLabel("Selected rows: 0")
-        self.lbl_total_items.setStyleSheet("color:#333333; font-weight:700;")
-        self.lbl_selected_rows.setStyleSheet("color:#555555; font-weight:600;")
+        self.lbl_total_items.setStyleSheet("color:#ffffff; font-weight:700;")
+        self.lbl_selected_rows.setStyleSheet("color:#c9ccd6; font-weight:600;")
 
         self.btn_file = QPushButton("File")
         self.btn_filters = QPushButton("Filters")
         self.btn_clear = QPushButton("Clear")
         for btn in (self.btn_file, self.btn_filters, self.btn_clear):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
-                "QPushButton:hover { background-color:#ff1a25; }"
-            )
+            btn.setStyleSheet(self._red_button_style)
         self.btn_file.clicked.connect(lambda: self._show_coming_soon("File"))
         self.btn_filters.clicked.connect(lambda: self._show_coming_soon("Filters"))
         self.btn_clear.clicked.connect(self._clear_table_ui_only)
