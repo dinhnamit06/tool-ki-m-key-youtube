@@ -15,13 +15,16 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
     QHeaderView,
 )
 import webbrowser
+import re
+from urllib.parse import parse_qs, urlparse
 
-from core.videos_fetcher import VideoSearchWorker
+from core.videos_fetcher import ImportedLinksMetadataWorker, VideoSearchWorker
 
 
 class VideosTab(QWidget):
@@ -31,6 +34,9 @@ class VideosTab(QWidget):
         self._mode = "search"
         self._checkbox_syncing = False
         self._search_worker = None
+        self._import_worker = None
+        self._invalid_import_count = 0
+        self._invalid_import_rows = []
         self._dark_label_style = "QLabel { color: #f3f4f6; }"
         self._light_input_style = (
             "QLineEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:5px 8px; }"
@@ -215,8 +221,24 @@ class VideosTab(QWidget):
         self.btn_get_data = QPushButton("Get Data")
         self.btn_get_data.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_get_data.setStyleSheet(self._red_button_style)
-        self.btn_get_data.clicked.connect(lambda: self._show_coming_soon("Get Data"))
-        v.addWidget(self.btn_get_data)
+        self.btn_get_data.clicked.connect(self.import_links_to_table)
+
+        self.btn_stop_import = QPushButton("Stop")
+        self.btn_stop_import.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_stop_import.setEnabled(False)
+        self.btn_stop_import.setStyleSheet(
+            "QPushButton { background-color:#3c4253; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
+            "QPushButton:hover { background-color:#4a5166; }"
+            "QPushButton:disabled { background-color:#2a2e3b; color:#8d92a3; }"
+        )
+        self.btn_stop_import.clicked.connect(self.stop_import)
+
+        get_data_row = QHBoxLayout()
+        get_data_row.setContentsMargins(0, 0, 0, 0)
+        get_data_row.setSpacing(8)
+        get_data_row.addWidget(self.btn_get_data)
+        get_data_row.addWidget(self.btn_stop_import)
+        v.addLayout(get_data_row)
 
         v.addWidget(QLabel("Extract video links by:"))
         row_type = QHBoxLayout()
@@ -230,28 +252,22 @@ class VideosTab(QWidget):
         v.addLayout(row_type)
 
         v.addWidget(QLabel("Youtube video links: ( one per line )"))
-        self.input_video_links = QLineEdit()
-        self.input_video_links.setPlaceholderText("https://www.youtube.com/watch?v=...")
-        self.input_video_links.setStyleSheet(self._light_input_style)
+        self.input_video_links = QTextEdit()
+        self.input_video_links.setPlaceholderText(
+            "https://www.youtube.com/watch?v=abc123\n"
+            "https://youtu.be/def456\n"
+            "https://www.youtube.com/shorts/ghi789"
+        )
+        self.input_video_links.setMinimumHeight(120)
+        self.input_video_links.setStyleSheet(
+            "QTextEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:6px 8px; }"
+            "QTextEdit:focus { border:1px solid #9c9c9c; }"
+        )
         v.addWidget(self.input_video_links)
-
-        self.text_links_block = QFrame()
-        self.text_links_block.setStyleSheet("QFrame { background-color:#ffffff; border:1px solid #c7c7c7; border-radius:3px; }")
-        links_layout = QVBoxLayout(self.text_links_block)
-        links_layout.setContentsMargins(6, 6, 6, 6)
-        links_layout.setSpacing(4)
-        for sample in (
-            "https://www.youtube.com/watch?v=abc123",
-            "https://www.youtube.com/watch?v=def456",
-            "https://www.youtube.com/watch?v=ghi789",
-            "https://www.youtube.com/watch?v=jkl012",
-            "https://www.youtube.com/watch?v=mno345",
-        ):
-            line = QLabel(sample)
-            line.setStyleSheet("color:#1a73e8;")
-            links_layout.addWidget(line)
-        links_layout.addStretch()
-        v.addWidget(self.text_links_block, stretch=1)
+        self.lbl_import_hint = QLabel("Tips: support watch, youtu.be, and shorts links.")
+        self.lbl_import_hint.setStyleSheet("QLabel { color:#b8bfd1; font-size:12px; }")
+        v.addWidget(self.lbl_import_hint)
+        v.addStretch()
         return page
 
     def _build_right_panel(self):
@@ -401,6 +417,10 @@ class VideosTab(QWidget):
         self.btn_search.setEnabled(not running)
         self.btn_stop_search.setEnabled(running)
 
+    def _set_import_running(self, running):
+        self.btn_get_data.setEnabled(not running)
+        self.btn_stop_import.setEnabled(running)
+
     def start_search(self):
         query = self.input_search_phrase.text().strip()
         if not query:
@@ -439,8 +459,145 @@ class VideosTab(QWidget):
             self._search_worker.stop()
             self._set_status("Stopping search...")
 
+    def stop_import(self):
+        if self._import_worker is not None and self._import_worker.isRunning():
+            self._import_worker.stop()
+            self._set_status("Stopping import...")
+
+    @staticmethod
+    def _extract_video_id_from_url(url_text):
+        url = (url_text or "").strip()
+        if not url:
+            return ""
+
+        if "://" not in url:
+            url = f"https://{url}"
+
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").strip("/")
+
+        if host.endswith("youtu.be"):
+            return path.split("/")[0] if path else ""
+
+        if "youtube.com" in host:
+            if path == "watch":
+                query = parse_qs(parsed.query)
+                return (query.get("v", [""])[0] or "").strip()
+            if path.startswith("shorts/"):
+                return path.split("/", 1)[1].split("/")[0]
+            if path.startswith("live/"):
+                return path.split("/", 1)[1].split("/")[0]
+
+        # fallback for pasted plain video IDs
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", url_text.strip()):
+            return url_text.strip()
+        return ""
+
+    def _parse_import_links(self, raw_text):
+        rows = []
+        invalid = []
+        seen_ids = set()
+
+        for raw_line in (raw_text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            video_id = self._extract_video_id_from_url(line)
+            if not video_id:
+                invalid.append(line)
+                continue
+            if video_id in seen_ids:
+                continue
+
+            seen_ids.add(video_id)
+            canonical = f"https://www.youtube.com/watch?v={video_id}"
+            rows.append(
+                {
+                    "Video ID": video_id,
+                    "Video Link": canonical,
+                    "Source": "Imported",
+                    "Search Phrase": "Browse Import",
+                    "Title": "(Imported link)",
+                    "Description": line,
+                }
+            )
+        return rows, invalid
+
+    def import_links_to_table(self):
+        if self._import_worker is not None and self._import_worker.isRunning():
+            QMessageBox.information(self, "Videos Tool", "Import is already running.")
+            return
+
+        raw_text = self.input_video_links.toPlainText().strip()
+        if not raw_text:
+            QMessageBox.warning(self, "Videos Tool", "Please paste at least one YouTube link.")
+            return
+
+        parsed_rows, invalid_rows = self._parse_import_links(raw_text)
+        if not parsed_rows:
+            QMessageBox.warning(self, "Videos Tool", "No valid YouTube links found.")
+            self._set_status("Import failed: no valid links.")
+            return
+
+        self._clear_table_ui_only()
+        self._invalid_import_count = len(invalid_rows)
+        self._invalid_import_rows = list(invalid_rows)
+        self._set_import_running(True)
+        self._set_status(f"Importing {len(parsed_rows)} links and fetching metadata...")
+
+        self._import_worker = ImportedLinksMetadataWorker(parsed_rows)
+        self._import_worker.row_signal.connect(self._append_video_row)
+        self._import_worker.status_signal.connect(self._set_status)
+        self._import_worker.error_signal.connect(self._on_import_error)
+        self._import_worker.finished_signal.connect(self._on_import_finished)
+        self._import_worker.start()
+
     def _on_search_error(self, error_text):
         QMessageBox.warning(self, "Videos Tool", error_text)
+
+    def _on_import_error(self, error_text):
+        QMessageBox.warning(self, "Videos Tool", error_text)
+
+    def _on_import_finished(self, result):
+        self._set_import_running(False)
+        count = int((result or {}).get("count", 0))
+        failed = int((result or {}).get("failed", 0))
+        failed_items = list((result or {}).get("failed_items", []))
+
+        suffix_parts = []
+        if self._invalid_import_count > 0:
+            suffix_parts.append(f"skipped invalid: {self._invalid_import_count}")
+        if failed > 0:
+            suffix_parts.append(f"metadata unavailable: {failed}")
+        suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+
+        self._set_status(f"Import finished: {count} rows{suffix}.")
+        if self._invalid_import_count > 0 or failed > 0:
+            details = []
+            if self._invalid_import_count > 0:
+                details.append(f"Invalid links skipped: {self._invalid_import_count}")
+                preview_invalid = self._invalid_import_rows[:3]
+                if preview_invalid:
+                    details.append("Examples:")
+                    for line in preview_invalid:
+                        details.append(f"- {line}")
+            if failed > 0:
+                details.append(f"Metadata failed after retry: {failed}")
+                preview_failed = failed_items[:3]
+                for item in preview_failed:
+                    link = str(item.get("video_link", "")).strip()
+                    err = str(item.get("error", "")).strip()
+                    if link:
+                        details.append(f"- {link}")
+                    if err:
+                        details.append(f"  reason: {err[:140]}")
+            QMessageBox.information(self, "Import Summary", "\n".join(details))
+
+        self._invalid_import_rows = []
+        self._invalid_import_count = 0
+        self._import_worker = None
 
     def _on_search_finished(self, result):
         self._set_search_running(False)
@@ -463,6 +620,11 @@ class VideosTab(QWidget):
         thumb_item = QTableWidgetItem("N/A")
         thumb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         thumb_item.setForeground(QColor("#666666"))
+        thumb_url = str(video.get("Thumbnail URL", "")).strip()
+        if thumb_url:
+            thumb_item.setText("IMG")
+            thumb_item.setForeground(QColor("#1a73e8"))
+            thumb_item.setToolTip(thumb_url)
         self.videos_table.setItem(row, 1, thumb_item)
 
         values = [
@@ -513,3 +675,32 @@ class VideosTab(QWidget):
 
     def _show_coming_soon(self, feature_name):
         QMessageBox.information(self, "Videos Tool", f"{feature_name} will be implemented in the next step.")
+
+    def receive_keywords_for_video_search(self, keywords, source_tool=""):
+        cleaned = []
+        seen = set()
+        for kw in keywords or []:
+            text = str(kw).strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(text)
+
+        if not cleaned:
+            return False
+
+        self.switch_mode("search")
+        self.input_search_phrase.setText(cleaned[0])
+        self.input_search_phrase.setFocus()
+
+        src = source_tool.strip() if source_tool else "another tool"
+        if len(cleaned) == 1:
+            self._set_status(f"Received 1 keyword from {src}. Ready to search.")
+        else:
+            self._set_status(
+                f"Received {len(cleaned)} keywords from {src}. Using first keyword for now."
+            )
+        return True

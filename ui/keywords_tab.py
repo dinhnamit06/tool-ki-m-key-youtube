@@ -96,6 +96,21 @@ class KeywordsTab(QWidget):
         range_layout.addWidget(range_label)
         range_layout.addWidget(self.range_combo)
 
+        # --- API Provider Section ---
+        api_layout = QVBoxLayout()
+        api_layout.setSpacing(8)
+
+        api_label = QLabel("API provider:")
+        api_label.setObjectName("input_label")
+        self.api_provider_combo = QComboBox()
+        self.api_provider_combo.addItems(["Gemini", "GPT", "Auto (Gemini -> GPT)"])
+        self.api_provider_combo.setCurrentText("Gemini")
+        self.api_provider_combo.setMinimumHeight(42)
+        self.api_provider_combo.setMinimumWidth(200)
+
+        api_layout.addWidget(api_label)
+        api_layout.addWidget(self.api_provider_combo)
+
         # --- Count Section ---
         count_layout = QVBoxLayout()
         count_layout.setSpacing(8)
@@ -148,6 +163,7 @@ class KeywordsTab(QWidget):
         input_row_layout.addLayout(seed_layout)
         input_row_layout.addLayout(country_layout)
         input_row_layout.addLayout(range_layout)
+        input_row_layout.addLayout(api_layout)
         input_row_layout.addLayout(count_layout)
         input_row_layout.addWidget(self.generate_btn, alignment=Qt.AlignmentFlag.AlignBottom)
         
@@ -292,6 +308,13 @@ class KeywordsTab(QWidget):
         seed_text = self.seed_input.text().strip()
         target_country = self.country_combo.currentText()
         target_count = int(self.count_spin.value())
+        provider_label = self.api_provider_combo.currentText().strip()
+        provider_map = {
+            "Gemini": "gemini",
+            "GPT": "gpt",
+            "Auto (Gemini -> GPT)": "auto",
+        }
+        provider = provider_map.get(provider_label, "gemini")
         if not seed_text:
             QMessageBox.warning(self, "Empty Input", "Please enter a seed keyword first.")
             return
@@ -321,7 +344,7 @@ Important rules:
 Seed keyword: {seed_text}
 """
         try:
-            content = generate_keywords_api(prompt)
+            content = generate_keywords_api(prompt, provider=provider)
             generated_list = [kw.strip() for kw in content.split(",") if kw.strip()]
         except Exception as e:
             QMessageBox.critical(self, "API Error", str(e))
@@ -445,7 +468,12 @@ Seed keyword: {seed_text}
             if has_sel and not (self.table.item(r,0) and self.table.item(r,0).checkState()==Qt.CheckState.Checked): continue
             kw = self.table.item(r, 5)
             if kw: keywords.append(kw.text())
-        if keywords: QMessageBox.information(self, "Sent", f"Sent {len(keywords)} keywords to {target} search tool.")
+        if not keywords:
+            return
+        if target == "video" and self.main_window is not None:
+            self.main_window.handle_send_to_videos(keywords, source_tool="Keywords")
+            return
+        QMessageBox.information(self, "Sent", f"Sent {len(keywords)} keywords to {target} search tool.")
 
     def mock_action(self, name): QMessageBox.information(self, "Action", f"Selected: '{name}'")
     def show_filters_placeholder(self): QMessageBox.information(self, "Filters", "Will be implemented soon.")

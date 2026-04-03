@@ -81,3 +81,17 @@ class TubeVibeApp(QMainWindow):
         self.tab_trends.trends_input.setText("\n".join(keywords))
         self.switch_tab(2)
         self.statusBar().showMessage(f"Sent {len(keywords)} keywords to Trends tool.", 4000)
+
+    def handle_send_to_videos(self, keywords, source_tool=""):
+        if not keywords:
+            return
+        accepted = self.tab_videos.receive_keywords_for_video_search(
+            keywords, source_tool=source_tool
+        )
+        if not accepted:
+            return
+        self.switch_tab(3)
+        src = source_tool or "another tool"
+        self.statusBar().showMessage(
+            f"Sent {len(keywords)} keywords to Videos tool from {src}.", 4000
+        )

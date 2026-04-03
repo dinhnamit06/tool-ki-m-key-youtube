@@ -7,6 +7,42 @@ Tai lieu chi tiet rieng cho tab Videos nam o: `stepvideotab.md`.
 - Tube Atlas website: https://tubeatlas.com.vn/
 - Video tham chieu 1: https://www.youtube.com/watch?v=sAiYwVGZ6JI&t=1471s
 - Video tham chieu 2: https://www.youtube.com/watch?v=bNQd7nw2Zw0
+- AppBreed Help Videos (index): https://appbreed.com/help-videos-tube-atlas/
+
+## 1.1) URL da xac thuc cho Videos tab (cap nhat 2026-04-03)
+- 21 tube-atlas-downloading-videos:
+  - https://vimeo.com/702556179
+  - https://i.vimeocdn.com/video/1419479118-653fc1fd9439e3fbd46498d98bd45d56e7ba435a01aacd46170b5fb507f5acf6-d?f=webp&region=us
+- 22 tube-atlas-download-video-thumbnails:
+  - https://vimeo.com/702556184
+  - https://i.vimeocdn.com/video/1419479186-9937920e53d5698ed5cad3dfdd7ddee891c55c1f31ffba91f578a0e584abf678-d?f=webp&region=us
+- 11 tube-atlas-analyze-titles:
+  - https://vimeo.com/702556396
+  - https://i.vimeocdn.com/video/1419482754-bb31964c8b3aaab73aa5d26199571a64f229ac20c5b58d752d49519b04578d26-d?f=webp&region=us
+- 14 tube-atlas-channels-tool:
+  - https://vimeo.com/702556438
+  - https://i.vimeocdn.com/video/1419479541-c102fc34657d580c8c162cdddce077df29d3b3660e134e5f1dc20badc397beec-d?f=webp&region=us
+- Tube Atlas Trends tool:
+  - https://vimeo.com/713284733
+  - https://i.vimeocdn.com/video/1437975831-8b21be6421c8259ddcf759340dfbd3fcc4937625d3f6f2a822e967bee606e9f8-d?f=webp&region=us
+- Videos tool (Search mode tham chieu):
+  - https://vimeo.com/702556377
+  - https://i.vimeocdn.com/video/1419479442-225a8d75a5e147046b24d5bc42809210458338bcd247dea80cb1cf123f1ee77a-d?f=webp&region=us
+- Videos tool (Browse or Import mode tham chieu):
+  - https://vimeo.com/702556409
+  - https://i.vimeocdn.com/video/1419479539-3c164ccfe087f1be85cbd5ec0fae467bf23701d86c19d625b4c3fc5b5ac9646b-d?f=webp&region=us
+- Filters UI tham chieu:
+  - https://vimeo.com/702556224
+  - https://i.vimeocdn.com/video/1419479192-db34db2e3e910198fb9dcdac6e57b46ab93d46bb439e82ce8ccb899a892b9fbb-d?f=webp&region=us
+- Video ads / related tham chieu:
+  - https://vimeo.com/726146748
+  - https://vimeo.com/726146770
+- Ad-free player tham chieu:
+  - https://vimeo.com/747379514
+  - https://i.vimeocdn.com/video/1503065816-3b5ae9b61c7e25195977288af161da6e1a824e3f395603b3a9af5f99e19cb35e-d?f=webp&region=us
+- Column configuration tham chieu:
+  - https://vimeo.com/747379500
+  - https://i.vimeocdn.com/video/1503065455-3fe45b8d3876b97ac54b35253cc678ddbe71d087e570ce848ce079bf022daf2b-d?f=webp&region=us
 
 ## 2) Nguyen tac UI thong nhat
 - Nen den -> chu trang.
@@ -73,13 +109,15 @@ Tai lieu chi tiet rieng cho tab Videos nam o: `stepvideotab.md`.
   - nhap 1 phrase -> co dong ket qua trong bang,
   - Total Items cap nhat dung.
 
-## V4 - Browse/Import mode: nhap link va get data (P1)
+## V4 - Browse/Import mode: nhap link va get data (P1) (done)
 - UI:
   - o nhap links (moi dong 1 link),
   - nut Get Data.
 - Logic:
   - parse link YouTube hop le,
-  - lay metadata co ban cho tung link.
+  - lay metadata co ban cho tung link (oEmbed),
+  - do row realtime khong block UI,
+  - co stop import.
 - Kiem thu:
   - paste 3-5 link -> bang them dong dung thu tu,
   - link loi duoc bo qua co thong bao.
@@ -96,6 +134,14 @@ Tai lieu chi tiet rieng cho tab Videos nam o: `stepvideotab.md`.
 - Kiem thu:
   - copy dung noi dung,
   - delete xong cap nhat Total Items.
+
+## V5A - Trending Videos backend (P1)
+- UI:
+  - nut Trending Videos hoat dong that.
+- Logic:
+  - nap du lieu trending vao table.
+- Kiem thu:
+  - bam nut -> table co ket qua.
 
 ## V6 - Filter + Search trong bang (P1)
 - UI:

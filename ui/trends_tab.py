@@ -1381,6 +1381,9 @@ class TrendsTab(QWidget):
         keywords = self._require_selected_keywords()
         if not keywords:
             return
+        if self.main_window is not None:
+            self.main_window.handle_send_to_videos(keywords, source_tool="Trends")
+            return
         print(f"[Trends] Sent to Video search tool: {keywords}")
         QMessageBox.information(self, "Trends", "Sent to Video search tool")
 

@@ -20,9 +20,27 @@ GEMINI_URL = (
     f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 )
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+
 
 def ensure_gemini_api_key():
     if not _DOTENV_PATH.exists() and not os.getenv("GEMINI_API_KEY", "").strip():
         raise ValueError("Please create .env file with GEMINI_API_KEY")
     if not GEMINI_API_KEY:
         raise ValueError("Please create .env file with GEMINI_API_KEY")
+
+
+def ensure_openai_api_key():
+    if not _DOTENV_PATH.exists() and not os.getenv("OPENAI_API_KEY", "").strip():
+        raise ValueError("Please create .env file with OPENAI_API_KEY")
+    if not OPENAI_API_KEY:
+        raise ValueError("Please create .env file with OPENAI_API_KEY")
+
+
+def get_openai_headers():
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+    }
