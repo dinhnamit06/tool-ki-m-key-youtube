@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, 
-    QPushButton, QFrame, QSizePolicy, QTableWidget, QTableWidgetItem, 
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QComboBox,
+    QPushButton, QFrame, QSizePolicy, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QMenu, QCheckBox, QApplication, QSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect
@@ -17,6 +17,7 @@ class KeywordsTab(QWidget):
         super().__init__()
         self.main_window = main_window # Reference to main app for status bar etc.
         self.select_all_state = False
+        self._model_value_by_label = {}
         self.setup_ui()
         
     def setup_ui(self):
@@ -34,9 +35,10 @@ class KeywordsTab(QWidget):
         input_frame = QFrame()
         input_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         input_frame.setObjectName("input_frame")
-        input_row_layout = QHBoxLayout(input_frame)
-        input_row_layout.setContentsMargins(20, 20, 20, 20)
-        input_row_layout.setSpacing(20)
+        input_grid_layout = QGridLayout(input_frame)
+        input_grid_layout.setContentsMargins(20, 20, 20, 20)
+        input_grid_layout.setHorizontalSpacing(16)
+        input_grid_layout.setVerticalSpacing(12)
         
         # --- Seed Keyword Section ---
         seed_layout = QVBoxLayout()
@@ -58,7 +60,7 @@ class KeywordsTab(QWidget):
         self.seed_input = QLineEdit()
         self.seed_input.setPlaceholderText("Enter seed keyword (e.g. dog toy or dog * toy)")
         self.seed_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.seed_input.setMinimumWidth(350)
+        self.seed_input.setMinimumWidth(220)
         self.seed_input.setMinimumHeight(42)
         
         seed_layout.addLayout(seed_label_layout)
@@ -77,7 +79,7 @@ class KeywordsTab(QWidget):
             "Indonesia", "Russia", "Mexico", "Turkey", "Philippines", "Australia", "Canada"
         ])
         self.country_combo.setMinimumHeight(42)
-        self.country_combo.setMinimumWidth(150)
+        self.country_combo.setMinimumWidth(120)
         
         country_layout.addWidget(country_label)
         country_layout.addWidget(self.country_combo)
@@ -91,25 +93,24 @@ class KeywordsTab(QWidget):
         self.range_combo = QComboBox()
         self.range_combo.addItems(["a - z, 0 - 9 (after seed keyword)", "a - z (after seed keyword)", "0 - 9 (after seed keyword)"])
         self.range_combo.setMinimumHeight(42)
-        self.range_combo.setMinimumWidth(260)
+        self.range_combo.setMinimumWidth(210)
         
         range_layout.addWidget(range_label)
         range_layout.addWidget(self.range_combo)
 
-        # --- API Provider Section ---
-        api_layout = QVBoxLayout()
-        api_layout.setSpacing(8)
+        # --- Model Section ---
+        model_layout = QVBoxLayout()
+        model_layout.setSpacing(8)
 
-        api_label = QLabel("API provider:")
-        api_label.setObjectName("input_label")
-        self.api_provider_combo = QComboBox()
-        self.api_provider_combo.addItems(["Gemini", "GPT", "Auto (Gemini -> GPT)"])
-        self.api_provider_combo.setCurrentText("Gemini")
-        self.api_provider_combo.setMinimumHeight(42)
-        self.api_provider_combo.setMinimumWidth(200)
+        model_label = QLabel("Model:")
+        model_label.setObjectName("input_label")
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumHeight(42)
+        self.model_combo.setMinimumWidth(180)
+        self._setup_gemini_model_choices()
 
-        api_layout.addWidget(api_label)
-        api_layout.addWidget(self.api_provider_combo)
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_combo)
 
         # --- Count Section ---
         count_layout = QVBoxLayout()
@@ -122,7 +123,7 @@ class KeywordsTab(QWidget):
         self.count_spin.setSingleStep(10)
         self.count_spin.setValue(10)
         self.count_spin.setMinimumHeight(42)
-        self.count_spin.setMinimumWidth(130)
+        self.count_spin.setMinimumWidth(95)
         self.count_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.count_spin.setStyleSheet("""
             QSpinBox {
@@ -155,17 +156,25 @@ class KeywordsTab(QWidget):
         self.generate_btn = QPushButton("✓ Generate")
         self.generate_btn.setObjectName("generate_btn")
         self.generate_btn.setMinimumHeight(42)
-        self.generate_btn.setMinimumWidth(160)
+        self.generate_btn.setMinimumWidth(150)
         self.generate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.generate_btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         self.generate_btn.clicked.connect(self.generate_keywords)
+        self.generate_btn.setText("Generate")
         
-        input_row_layout.addLayout(seed_layout)
-        input_row_layout.addLayout(country_layout)
-        input_row_layout.addLayout(range_layout)
-        input_row_layout.addLayout(api_layout)
-        input_row_layout.addLayout(count_layout)
-        input_row_layout.addWidget(self.generate_btn, alignment=Qt.AlignmentFlag.AlignBottom)
+        # One-row compact layout.
+        input_grid_layout.addLayout(seed_layout, 0, 0, 1, 1)
+        input_grid_layout.addLayout(country_layout, 0, 1, 1, 1)
+        input_grid_layout.addLayout(range_layout, 0, 2, 1, 1)
+        input_grid_layout.addLayout(model_layout, 0, 3, 1, 1)
+        input_grid_layout.addLayout(count_layout, 0, 4, 1, 1)
+        input_grid_layout.addWidget(self.generate_btn, 0, 5, 1, 1, alignment=Qt.AlignmentFlag.AlignBottom)
+        input_grid_layout.setColumnStretch(0, 3)
+        input_grid_layout.setColumnStretch(1, 2)
+        input_grid_layout.setColumnStretch(2, 3)
+        input_grid_layout.setColumnStretch(3, 2)
+        input_grid_layout.setColumnStretch(4, 1)
+        input_grid_layout.setColumnStretch(5, 1)
         
         content_layout.addWidget(input_frame)
         
@@ -308,13 +317,8 @@ class KeywordsTab(QWidget):
         seed_text = self.seed_input.text().strip()
         target_country = self.country_combo.currentText()
         target_count = int(self.count_spin.value())
-        provider_label = self.api_provider_combo.currentText().strip()
-        provider_map = {
-            "Gemini": "gemini",
-            "GPT": "gpt",
-            "Auto (Gemini -> GPT)": "auto",
-        }
-        provider = provider_map.get(provider_label, "gemini")
+        provider = "gemini"
+        model_name = self._selected_model_value()
         if not seed_text:
             QMessageBox.warning(self, "Empty Input", "Please enter a seed keyword first.")
             return
@@ -344,7 +348,7 @@ Important rules:
 Seed keyword: {seed_text}
 """
         try:
-            content = generate_keywords_api(prompt, provider=provider)
+            content = generate_keywords_api(prompt, provider=provider, model_name=model_name)
             generated_list = [kw.strip() for kw in content.split(",") if kw.strip()]
         except Exception as e:
             QMessageBox.critical(self, "API Error", str(e))
@@ -352,6 +356,7 @@ Seed keyword: {seed_text}
         finally:
             self.generate_btn.setText("✓ Generate")
             self.generate_btn.setEnabled(True)
+            self.generate_btn.setText("Generate")
             
         if not generated_list:
             return
@@ -369,6 +374,21 @@ Seed keyword: {seed_text}
                 rank += 1
             
         self.populate_table(results)
+
+    def _setup_gemini_model_choices(self):
+        options = [
+            ("Gemini 2.5 Flash", "gemini-2.5-flash"),
+            ("Gemini 2.5 Flash Lite", "gemini-2.5-flash-lite"),
+        ]
+        self._model_value_by_label = {label: value for label, value in options}
+        self.model_combo.clear()
+        for label, _ in options:
+            self.model_combo.addItem(label)
+        self.model_combo.setCurrentIndex(1)
+
+    def _selected_model_value(self):
+        label = self.model_combo.currentText().strip() if hasattr(self, "model_combo") else ""
+        return self._model_value_by_label.get(label, "")
 
     def populate_table(self, data):
         self.table.blockSignals(True)

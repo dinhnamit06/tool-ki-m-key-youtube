@@ -1,5 +1,5 @@
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,11 +20,59 @@ from PyQt6.QtWidgets import (
     QWidget,
     QHeaderView,
 )
+from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 import webbrowser
 import re
 from urllib.parse import parse_qs, urlparse
 
 from core.videos_fetcher import ImportedLinksMetadataWorker, VideoSearchWorker
+from utils.constants import REQUESTS_INSTALLED
+
+try:
+    import requests
+except ImportError:  # pragma: no cover
+    requests = None
+
+
+class ThumbnailFallbackWorker(QThread):
+    finished_signal = pyqtSignal(str, bytes, str)
+
+    def __init__(self, request_url):
+        super().__init__()
+        self.request_url = str(request_url or "").strip()
+
+    def _candidate_urls(self):
+        return VideoSearchWorker._thumbnail_candidates(self.request_url)
+
+    def run(self):
+        if not REQUESTS_INSTALLED or requests is None:
+            self.finished_signal.emit(self.request_url, b"", "requests not installed")
+            return
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Referer": "https://www.youtube.com/",
+        }
+
+        last_error = "thumbnail download failed"
+        for candidate in self._candidate_urls():
+            try:
+                response = requests.get(candidate, headers=headers, timeout=15)
+                response.raise_for_status()
+                content = bytes(response.content or b"")
+                if content:
+                    self.finished_signal.emit(self.request_url, content, "")
+                    return
+                last_error = "empty thumbnail response"
+            except Exception as exc:
+                last_error = str(exc).strip() or "thumbnail download failed"
+
+        self.finished_signal.emit(self.request_url, b"", last_error)
 
 
 class VideosTab(QWidget):
@@ -37,6 +85,12 @@ class VideosTab(QWidget):
         self._import_worker = None
         self._invalid_import_count = 0
         self._invalid_import_rows = []
+        self._thumbnail_cache = {}
+        self._thumbnail_pending_rows = {}
+        self._thumbnail_inflight = set()
+        self._thumbnail_fallback_workers = {}
+        self._thumbnail_manager = QNetworkAccessManager(self)
+        self._thumbnail_manager.finished.connect(self._on_thumbnail_finished)
         self._dark_label_style = "QLabel { color: #f3f4f6; }"
         self._light_input_style = (
             "QLineEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:5px 8px; }"
@@ -306,7 +360,7 @@ class VideosTab(QWidget):
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
 
         self.videos_table.setColumnWidth(0, 26)
-        self.videos_table.setColumnWidth(1, 58)
+        self.videos_table.setColumnWidth(1, 94)
         self.videos_table.setColumnWidth(2, 100)
         self.videos_table.setColumnWidth(3, 210)
         self.videos_table.setColumnWidth(4, 76)
@@ -323,10 +377,10 @@ class VideosTab(QWidget):
         slider_label.setStyleSheet("QLabel { color:#f3f4f6; }")
         slider_row.addWidget(slider_label)
         self.slider_image_size = QSlider(Qt.Orientation.Horizontal)
-        self.slider_image_size.setRange(20, 80)
-        self.slider_image_size.setValue(25)
+        self.slider_image_size.setRange(40, 140)
+        self.slider_image_size.setValue(72)
         self.slider_image_size.valueChanged.connect(self._on_image_size_changed)
-        self.lbl_image_size = QLabel("25 px")
+        self.lbl_image_size = QLabel("72 px")
         self.lbl_image_size.setMinimumWidth(44)
         self.lbl_image_size.setStyleSheet("QLabel { color:#f3f4f6; }")
         slider_row.addWidget(self.slider_image_size, stretch=1)
@@ -364,6 +418,7 @@ class VideosTab(QWidget):
         bottom.addWidget(self.btn_filters)
         bottom.addWidget(self.btn_clear)
         v.addLayout(bottom)
+        self._on_image_size_changed(self.slider_image_size.value())
         return panel
 
     def switch_mode(self, mode):
@@ -385,7 +440,9 @@ class VideosTab(QWidget):
 
     def _on_image_size_changed(self, value):
         self.lbl_image_size.setText(f"{int(value)} px")
-        self.videos_table.verticalHeader().setDefaultSectionSize(max(26, int(value) + 8))
+        height_px = max(22, int(value * 9 / 16))
+        self.videos_table.verticalHeader().setDefaultSectionSize(max(28, height_px + 8))
+        self._refresh_visible_thumbnails()
 
     def _on_table_item_changed(self, item):
         if self._checkbox_syncing:
@@ -407,6 +464,17 @@ class VideosTab(QWidget):
     def _clear_table_ui_only(self):
         self.videos_table.setRowCount(0)
         self._update_status_labels()
+        self._thumbnail_cache.clear()
+        self._thumbnail_pending_rows.clear()
+        self._thumbnail_inflight.clear()
+        for url, worker in list(self._thumbnail_fallback_workers.items()):
+            try:
+                worker.finished_signal.disconnect(self._on_thumbnail_fallback_finished)
+            except Exception:
+                pass
+            worker.quit()
+            worker.wait(1000)
+        self._thumbnail_fallback_workers.clear()
 
     def _set_status(self, message):
         self.lbl_status.setText(message)
@@ -620,12 +688,17 @@ class VideosTab(QWidget):
         thumb_item = QTableWidgetItem("N/A")
         thumb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         thumb_item.setForeground(QColor("#666666"))
-        thumb_url = str(video.get("Thumbnail URL", "")).strip()
+        thumb_url = VideoSearchWorker._normalize_thumbnail_url(
+            str(video.get("Thumbnail URL", "")).strip(),
+            video_id=str(video.get("Video ID", "")).strip(),
+        )
         if thumb_url:
-            thumb_item.setText("IMG")
+            thumb_item.setText("...")
             thumb_item.setForeground(QColor("#1a73e8"))
             thumb_item.setToolTip(thumb_url)
         self.videos_table.setItem(row, 1, thumb_item)
+        if thumb_url:
+            self._queue_thumbnail_load(row, thumb_url)
 
         values = [
             video.get("Video ID", ""),
@@ -672,6 +745,135 @@ class VideosTab(QWidget):
         link = item.text().strip()
         if link.startswith("http://") or link.startswith("https://"):
             webbrowser.open_new_tab(link)
+
+    def _thumbnail_size_px(self):
+        return max(40, int(self.slider_image_size.value()))
+
+    def _queue_thumbnail_load(self, row, thumb_url):
+        if not thumb_url:
+            return
+
+        if thumb_url in self._thumbnail_cache:
+            self._apply_thumbnail_to_row(row, thumb_url)
+            return
+
+        waiting_rows = self._thumbnail_pending_rows.setdefault(thumb_url, [])
+        if row not in waiting_rows:
+            waiting_rows.append(row)
+
+        if thumb_url in self._thumbnail_inflight:
+            return
+
+        self._thumbnail_inflight.add(thumb_url)
+        request = QNetworkRequest(QUrl(thumb_url))
+        request.setRawHeader(
+            b"User-Agent",
+            b"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            b"(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        )
+        request.setRawHeader(b"Referer", b"https://www.youtube.com/")
+        self._thumbnail_manager.get(request)
+
+    def _on_thumbnail_finished(self, reply):
+        req_url = reply.request().url().toString()
+        try:
+            if reply.error():
+                self._start_thumbnail_fallback(req_url)
+                return
+            data = reply.readAll()
+            pix = QPixmap()
+            if not pix.loadFromData(bytes(data)):
+                self._start_thumbnail_fallback(req_url)
+                return
+            self._thumbnail_cache[req_url] = pix
+            rows = self._thumbnail_pending_rows.get(req_url, [])
+            for row in rows:
+                self._apply_thumbnail_to_row(row, req_url)
+            self._cleanup_thumbnail_request(req_url)
+        finally:
+            reply.deleteLater()
+
+    def _start_thumbnail_fallback(self, req_url):
+        req_url = str(req_url or "").strip()
+        if not req_url:
+            return
+        if req_url in self._thumbnail_fallback_workers:
+            return
+        # Keep this URL inflight while fallback worker runs, to avoid duplicate fetches.
+        self._thumbnail_inflight.add(req_url)
+        worker = ThumbnailFallbackWorker(req_url)
+        worker.finished_signal.connect(self._on_thumbnail_fallback_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._thumbnail_fallback_workers[req_url] = worker
+        worker.start()
+
+    def _on_thumbnail_fallback_finished(self, req_url, image_bytes, error_text):
+        req_url = str(req_url or "").strip()
+        worker = self._thumbnail_fallback_workers.pop(req_url, None)
+        if worker is not None:
+            try:
+                worker.finished_signal.disconnect(self._on_thumbnail_fallback_finished)
+            except Exception:
+                pass
+
+        pix = QPixmap()
+        if image_bytes and pix.loadFromData(image_bytes):
+            self._thumbnail_cache[req_url] = pix
+            rows = self._thumbnail_pending_rows.get(req_url, [])
+            for row in rows:
+                self._apply_thumbnail_to_row(row, req_url)
+            self._cleanup_thumbnail_request(req_url)
+            return
+
+        # Fallback also failed: restore readable text instead of leaving "..."
+        rows = self._thumbnail_pending_rows.get(req_url, [])
+        for row in rows:
+            if row < 0 or row >= self.videos_table.rowCount():
+                continue
+            item = self.videos_table.item(row, 1)
+            if item is None:
+                continue
+            item.setData(Qt.ItemDataRole.DecorationRole, None)
+            item.setText("N/A")
+            item.setForeground(QColor("#666666"))
+            if error_text:
+                item.setToolTip(error_text[:160])
+        self._cleanup_thumbnail_request(req_url)
+
+    def _cleanup_thumbnail_request(self, req_url):
+        if req_url in self._thumbnail_inflight:
+            self._thumbnail_inflight.remove(req_url)
+        if req_url in self._thumbnail_pending_rows:
+            del self._thumbnail_pending_rows[req_url]
+
+    def _apply_thumbnail_to_row(self, row, thumb_url):
+        if row < 0 or row >= self.videos_table.rowCount():
+            return
+        pix = self._thumbnail_cache.get(thumb_url)
+        if pix is None:
+            return
+        item = self.videos_table.item(row, 1)
+        if item is None:
+            return
+
+        thumb = pix.scaled(
+            self._thumbnail_size_px(),
+            max(22, int(self._thumbnail_size_px() * 9 / 16)),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        item.setData(Qt.ItemDataRole.DecorationRole, thumb)
+        item.setText("")
+        item.setToolTip(thumb_url)
+
+    def _refresh_visible_thumbnails(self):
+        for row in range(self.videos_table.rowCount()):
+            item = self.videos_table.item(row, 1)
+            if item is None:
+                continue
+            url = item.toolTip().strip()
+            if url and url in self._thumbnail_cache:
+                self._apply_thumbnail_to_row(row, url)
 
     def _show_coming_soon(self, feature_name):
         QMessageBox.information(self, "Videos Tool", f"{feature_name} will be implemented in the next step.")

@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlencode
@@ -38,6 +39,49 @@ class VideoSearchWorker(QThread):
         if isinstance(runs, list):
             return "".join(str(part.get("text", "")) for part in runs if isinstance(part, dict)).strip()
         return ""
+
+    @staticmethod
+    def _extract_thumbnail_url(field: Optional[dict]) -> str:
+        if not isinstance(field, dict):
+            return ""
+        thumbs = field.get("thumbnails", [])
+        if not isinstance(thumbs, list) or not thumbs:
+            return ""
+        last = thumbs[-1] if isinstance(thumbs[-1], dict) else {}
+        raw_url = str(last.get("url", "")).strip()
+        return VideoSearchWorker._normalize_thumbnail_url(raw_url)
+
+    @staticmethod
+    def _extract_video_id_from_thumbnail_url(thumb_url: str) -> str:
+        match = re.search(r"/vi(?:_webp)?/([^/]+)/", str(thumb_url or ""))
+        if not match:
+            return ""
+        return str(match.group(1)).strip()
+
+    @staticmethod
+    def _normalize_thumbnail_url(thumb_url: str, video_id: str = "") -> str:
+        url = str(thumb_url or "").strip()
+        if not url:
+            return ""
+        vid = str(video_id or "").strip() or VideoSearchWorker._extract_video_id_from_thumbnail_url(url)
+        if not vid:
+            return url
+        # Prefer higher quality JPEG while keeping PyQt decode stable.
+        return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+
+    @staticmethod
+    def _thumbnail_candidates(thumb_url: str, video_id: str = "") -> List[str]:
+        vid = str(video_id or "").strip() or VideoSearchWorker._extract_video_id_from_thumbnail_url(thumb_url)
+        urls: List[str] = []
+        if str(thumb_url or "").strip():
+            urls.append(str(thumb_url).strip())
+        if not vid:
+            return urls
+        for quality in ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg", "mqdefault.jpg"):
+            candidate = f"https://i.ytimg.com/vi/{vid}/{quality}"
+            if candidate not in urls:
+                urls.append(candidate)
+        return urls
 
     @staticmethod
     def _extract_json_blob(page_html: str, marker: str) -> Optional[str]:
@@ -160,6 +204,10 @@ class VideoSearchWorker(QThread):
                 "Search Phrase": self.query,
                 "Title": title,
                 "Description": description,
+                "Thumbnail URL": self._normalize_thumbnail_url(
+                    self._extract_thumbnail_url(renderer.get("thumbnail")),
+                    video_id=video_id,
+                ),
             }
             seen_ids.add(video_id)
             results.append(payload)
@@ -286,7 +334,10 @@ class ImportedLinksMetadataWorker(QThread):
                     row["Source"] = f"Imported ({author})"
                 thumb = meta.get("thumbnail_url", "")
                 if thumb:
-                    row["Thumbnail URL"] = thumb
+                    row["Thumbnail URL"] = VideoSearchWorker._normalize_thumbnail_url(
+                        thumb,
+                        video_id=str(row.get("Video ID", "")).strip(),
+                    )
                 success_count += 1
             else:
                 # Keep the row, only flag metadata fallback.

@@ -179,11 +179,13 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 
 ## Pha A - Search mode
 
-### SV-04 - Thumbnail cot Image (async)
+### SV-04 - Thumbnail cot Image (async) (done)
 - UI:
   - Cot `Image` hien thumbnail that (khong con N/A).
 - Logic:
   - tai thumbnail async, co fallback khi loi.
+  - cache thumbnail theo URL.
+  - doi kich thuoc thumbnail theo slider Image Size.
 - Test:
   - 20 rows -> thumbnail hien tuan tu.
   - UI khong giat lag.
