@@ -2,11 +2,13 @@ import webbrowser
 import sys
 import random
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
 import numpy as np
-from PyQt6.QtCore import Qt, QUrl, QTimer
+from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -35,7 +37,7 @@ from PyQt6.QtWidgets import (
 
 from core.trends_fetcher import TrendsFetcherWorker
 from utils.constants import CAT_MAP, COUNTRY_LIST, GEO_MAP, TIME_MAP
-from utils.proxy_utils import parse_proxy_lines
+from utils.proxy_utils import parse_proxy_lines, to_requests_proxies
 
 try:
     import requests
@@ -484,6 +486,106 @@ class TrendsSettingsDialog(QDialog):
         }
 
 
+class ProxyHealthCheckWorker(QThread):
+    progress_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(list, list, float)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, proxy_list, timeout_seconds=4.0):
+        super().__init__()
+        self.proxy_list = list(proxy_list or [])
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    @staticmethod
+    def _safe_proxy_label(proxy_text):
+        text = str(proxy_text or "").strip()
+        if not text:
+            return "proxy"
+        if "://" in text:
+            text = text.split("://", 1)[1]
+        if "@" in text:
+            text = text.split("@", 1)[1]
+        return text
+
+    def _is_proxy_alive(self, proxy_url):
+        if not self._running:
+            return False
+        proxy_map = to_requests_proxies(proxy_url)
+        if not proxy_map:
+            return False
+
+        endpoints = [
+            ("https://www.google.com/generate_204", 204),
+            ("https://httpbin.org/ip", 200),
+            ("http://httpbin.org/ip", 200),
+        ]
+        headers = {"User-Agent": "Mozilla/5.0"}
+        for endpoint, expected in endpoints:
+            if not self._running:
+                return False
+            try:
+                response = requests.get(
+                    endpoint,
+                    headers=headers,
+                    proxies=proxy_map,
+                    timeout=(self.timeout_seconds, self.timeout_seconds),
+                )
+                if response.status_code == expected or (expected == 200 and response.status_code < 400):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def run(self):
+        if requests is None:
+            self.error_signal.emit("requests is required. Run: pip install requests")
+            self.finished_signal.emit([], list(self.proxy_list), 0.0)
+            return
+
+        proxies = [str(p).strip() for p in self.proxy_list if str(p).strip()]
+        if not proxies:
+            self.finished_signal.emit([], [], 0.0)
+            return
+
+        start_ts = time.time()
+        alive = []
+        dead = []
+        total = len(proxies)
+        completed = 0
+        max_workers = min(24, max(4, total // 5 if total >= 20 else 4))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {pool.submit(self._is_proxy_alive, proxy): proxy for proxy in proxies}
+            for future in as_completed(future_map):
+                if not self._running:
+                    break
+                proxy = future_map[future]
+                ok = False
+                try:
+                    ok = bool(future.result())
+                except Exception:
+                    ok = False
+
+                if ok:
+                    alive.append(proxy)
+                else:
+                    dead.append(proxy)
+                completed += 1
+                self.progress_signal.emit(
+                    f"Checking proxies... {completed}/{total} (live: {len(alive)})"
+                )
+
+        if not self._running:
+            self.finished_signal.emit(alive, dead, time.time() - start_ts)
+            return
+
+        self.finished_signal.emit(alive, dead, time.time() - start_ts)
+
+
 class TrendsTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -539,6 +641,10 @@ class TrendsTab(QWidget):
         )
         self._proxy_enabled = bool(proxy_settings.get("enabled", False))
         self._proxy_list = list(proxy_settings.get("proxies", []))
+        self._proxy_health_worker = None
+        self._pending_keywords_after_proxy_check = []
+        self._proxy_health_check_before_go = True
+        self._proxy_health_timeout_seconds = 4.0
         self._browser_wait_timer = QTimer(self)
         self._browser_wait_timer.setSingleShot(True)
         self._browser_wait_timer.timeout.connect(self._load_next_browser_keyword)
@@ -738,6 +844,31 @@ class TrendsTab(QWidget):
         self.lbl_proxy_total.setStyleSheet("color: #cfd4df; font-size: 11px;")
         self.browser_panel_layout.addWidget(self.lbl_proxy_total)
 
+        proxy_health_row = QHBoxLayout()
+        proxy_health_row.setContentsMargins(0, 0, 0, 0)
+        proxy_health_row.setSpacing(6)
+        self.chk_proxy_health_before_go = QCheckBox("Health check before Go")
+        self.chk_proxy_health_before_go.setChecked(True)
+        self.chk_proxy_health_before_go.setStyleSheet("color: #d4d8e2; font-size: 11px;")
+        self.chk_proxy_health_before_go.toggled.connect(
+            lambda checked: setattr(self, "_proxy_health_check_before_go", bool(checked))
+        )
+        proxy_health_row.addWidget(self.chk_proxy_health_before_go)
+        proxy_health_row.addStretch()
+        proxy_health_row.addWidget(QLabel("Timeout"))
+        self.spin_proxy_health_timeout = QSpinBox()
+        self.spin_proxy_health_timeout.setRange(1, 15)
+        self.spin_proxy_health_timeout.setValue(4)
+        self.spin_proxy_health_timeout.setStyleSheet(
+            "background-color: #ffffff; color: #000000; border: 1px solid #8a8f9f; border-radius: 2px; padding: 2px 4px; font-size: 11px;"
+        )
+        self.spin_proxy_health_timeout.valueChanged.connect(
+            lambda value: setattr(self, "_proxy_health_timeout_seconds", float(value))
+        )
+        proxy_health_row.addWidget(self.spin_proxy_health_timeout)
+        proxy_health_row.addWidget(QLabel("s"))
+        self.browser_panel_layout.addLayout(proxy_health_row)
+
         proxy_btn_row = QHBoxLayout()
         proxy_btn_row.setContentsMargins(0, 0, 0, 0)
         proxy_btn_row.setSpacing(6)
@@ -777,6 +908,14 @@ class TrendsTab(QWidget):
         )
         self.btn_load_proxy_txt.clicked.connect(self._load_proxies_from_txt)
         proxy_action_row.addWidget(self.btn_load_proxy_txt)
+
+        self.btn_check_proxy_health = QPushButton("Check Proxies")
+        self.btn_check_proxy_health.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_check_proxy_health.setStyleSheet(
+            "background-color: #252b3a; color: #ffffff; border: 1px solid #434b60; border-radius: 4px; font-weight: 600; padding: 5px 10px;"
+        )
+        self.btn_check_proxy_health.clicked.connect(self._run_proxy_health_check_only)
+        proxy_action_row.addWidget(self.btn_check_proxy_health)
 
         self.btn_proxy_settings = QPushButton("Settings")
         self.btn_proxy_settings.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -994,6 +1133,105 @@ class TrendsTab(QWidget):
         self._sync_proxy_settings_to_main_window()
         added_count = max(0, len(merged) - len(existing))
         return added_count, len(merged)
+
+    def _replace_proxy_list_in_ui(self, proxies):
+        clean = self._dedupe_proxies(proxies)
+        self.proxy_input.blockSignals(True)
+        self.proxy_input.setPlainText(self._proxies_to_display_text(clean))
+        self.proxy_input.blockSignals(False)
+        self._refresh_proxy_summary()
+        self._sync_proxy_settings_to_main_window()
+        return len(clean)
+
+    def _set_proxy_ui_busy(self, busy):
+        enabled = not bool(busy)
+        for widget_name in (
+            "btn_load_free_proxies",
+            "btn_load_proxy_txt",
+            "btn_check_proxy_health",
+            "combo_proxy_source",
+            "spin_proxy_health_timeout",
+            "btn_use_proxies",
+            "chk_proxy_health_before_go",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
+
+    def _run_proxy_health_check_only(self):
+        proxies = self._collect_proxy_list_from_ui()
+        if not proxies:
+            QMessageBox.warning(self, "Proxy Health", "Proxy list is empty.")
+            return
+        self._start_proxy_health_check(proxies, auto_start_fetch=False)
+
+    def _start_proxy_health_check(self, proxies, auto_start_fetch=False):
+        if self._proxy_health_worker is not None and self._proxy_health_worker.isRunning():
+            QMessageBox.information(self, "Proxy Health", "Proxy health check is already running.")
+            return False
+
+        proxy_candidates = [str(p).strip() for p in (proxies or []) if str(p).strip()]
+        if not proxy_candidates:
+            QMessageBox.warning(self, "Proxy Health", "No proxies to check.")
+            return False
+
+        self._set_proxy_ui_busy(True)
+        self._set_fetch_buttons_running(True)
+        self._set_worker_status(f"Checking {len(proxy_candidates)} proxies...")
+
+        self._proxy_health_worker = ProxyHealthCheckWorker(
+            proxy_list=proxy_candidates,
+            timeout_seconds=float(self._proxy_health_timeout_seconds),
+        )
+        self._proxy_health_worker.progress_signal.connect(self._set_worker_status)
+        self._proxy_health_worker.error_signal.connect(self.on_trends_error)
+        self._proxy_health_worker.finished_signal.connect(
+            lambda alive, dead, elapsed, run_fetch=bool(auto_start_fetch): self._on_proxy_health_check_finished(
+                alive, dead, elapsed, run_fetch
+            )
+        )
+        self._proxy_health_worker.start()
+        return True
+
+    def _on_proxy_health_check_finished(self, alive, dead, elapsed_seconds, run_fetch):
+        self._set_proxy_ui_busy(False)
+        self._proxy_health_worker = None
+
+        alive_count = len(alive)
+        dead_count = len(dead)
+        self._replace_proxy_list_in_ui(alive)
+
+        base_msg = (
+            f"Proxy health check done in {round(float(elapsed_seconds), 1)}s: "
+            f"live {alive_count}, dead {dead_count}."
+        )
+        self._set_worker_status(base_msg)
+
+        if not run_fetch:
+            self._set_fetch_buttons_running(False)
+            QMessageBox.information(self, "Proxy Health", base_msg)
+            return
+
+        pending_keywords = list(self._pending_keywords_after_proxy_check)
+        self._pending_keywords_after_proxy_check = []
+        if not pending_keywords:
+            self._set_fetch_buttons_running(False)
+            return
+
+        if not alive:
+            self._set_fetch_buttons_running(False)
+            QMessageBox.warning(
+                self,
+                "Proxy Health",
+                "No live proxies found. Please load another list or disable proxy.",
+            )
+            return
+
+        self._start_pytrends_fetch(
+            pending_keywords,
+            clear_table=True,
+            proxy_override=alive,
+        )
 
     @staticmethod
     def _http_get_text(url, timeout=20, headers=None):
@@ -1520,7 +1758,7 @@ class TrendsTab(QWidget):
         self._load_next_browser_keyword()
         return True
 
-    def _start_pytrends_fetch(self, keywords, clear_table=True):
+    def _start_pytrends_fetch(self, keywords, clear_table=True, proxy_override=None):
         if clear_table:
             self.trends_table.setRowCount(0)
             self._sparkline_cache.clear()
@@ -1533,9 +1771,12 @@ class TrendsTab(QWidget):
             else {"enabled": False, "proxies": []}
         )
         use_proxies = bool(proxy_settings.get("enabled", False))
-        proxy_list = list(proxy_settings.get("proxies", []))
+        if proxy_override is not None:
+            proxy_list = [str(p).strip() for p in proxy_override if str(p).strip()]
+        else:
+            proxy_list = list(proxy_settings.get("proxies", []))
         max_proxies_per_run = max(1, int(self.trends_settings.get("max_proxies_per_run", 30)))
-        if proxy_list:
+        if proxy_list and proxy_override is None:
             proxy_list = proxy_list[:max_proxies_per_run]
         if use_proxies and not proxy_list:
             QMessageBox.warning(self, "Proxy", "Proxy is enabled but the list is empty.")
@@ -1612,7 +1853,24 @@ class TrendsTab(QWidget):
         # Always prioritize in-app data fetch so table can fill in real time.
         started = True
         if self._run_pytrends_with_external_browser:
-            started = self._start_pytrends_fetch(keywords, clear_table=True)
+            self._sync_proxy_settings_to_main_window()
+            proxy_settings = (
+                self.main_window.get_proxy_settings()
+                if self.main_window is not None and hasattr(self.main_window, "get_proxy_settings")
+                else {"enabled": False, "proxies": []}
+            )
+            use_proxies = bool(proxy_settings.get("enabled", False))
+            proxy_list = list(proxy_settings.get("proxies", []))
+            if use_proxies and self._proxy_health_check_before_go:
+                max_proxies_per_run = max(1, int(self.trends_settings.get("max_proxies_per_run", 30)))
+                proxy_list = proxy_list[:max_proxies_per_run]
+                if not proxy_list:
+                    QMessageBox.warning(self, "Proxy", "Proxy is enabled but the list is empty.")
+                    return
+                self._pending_keywords_after_proxy_check = list(keywords)
+                started = self._start_proxy_health_check(proxy_list, auto_start_fetch=True)
+            else:
+                started = self._start_pytrends_fetch(keywords, clear_table=True)
         else:
             self._set_fetch_buttons_running(True)
         if not started:
@@ -1625,6 +1883,13 @@ class TrendsTab(QWidget):
     def stop_trends_fetch(self):
         if self._browser_sequence_active:
             self._finish_browser_sequence(stopped=True)
+
+        if self._proxy_health_worker is not None and self._proxy_health_worker.isRunning():
+            self._pending_keywords_after_proxy_check = []
+            self._proxy_health_worker.stop()
+            self.btn_trends_stop.setText("Stopping...")
+            self._set_worker_status("Stopping proxy health check...")
+            return
 
         if hasattr(self, "trends_worker") and self.trends_worker.isRunning():
             self.trends_worker.is_running = False
