@@ -42,6 +42,12 @@ class ToolInboxPage(QWidget):
         if hint_text:
             self.lbl_hint.setText(str(hint_text))
 
+    def receive_links_for_import(self, links, hint_text=""):
+        clean_links = [str(link).strip() for link in (links or []) if str(link).strip()]
+        self.text_payload.setPlainText("\n".join(clean_links))
+        if hint_text:
+            self.lbl_hint.setText(str(hint_text))
+
 class TubeVibeApp(QMainWindow):
     def __init__(self):
         super().__init__()

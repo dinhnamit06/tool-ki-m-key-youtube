@@ -2,6 +2,8 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from html import unescape
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlencode
@@ -32,10 +34,26 @@ def _response_text_utf8(response) -> str:
     return str(getattr(response, "text", "") or "")
 
 
+def _http_get(url: str, *, params=None, headers=None, timeout=25, proxy_url: str = "", proxies=None):
+    if not REQUESTS_INSTALLED or requests is None:
+        raise ImportError("Dependency Error: requests is missing. Run: pip install requests")
+    session = requests.Session()
+    session.trust_env = False
+    proxy_payload = proxies
+    if proxy_payload is None and proxy_url:
+        normalized = normalize_proxy(proxy_url)
+        proxy_payload = to_requests_proxies(normalized) if normalized else None
+    if proxy_payload:
+        session.proxies.update(proxy_payload)
+    response = session.get(url, params=params, headers=headers, timeout=timeout)
+    return response
+
+
 def _default_video_row() -> Dict[str, str]:
     return {
         "Rating": "not-given",
         "Comments": "not-given",
+        "View Count": "not-given",
         "Length Seconds": "not-given",
         "Published": "not-given",
         "Published Age (Days)": "not-given",
@@ -47,6 +65,35 @@ def _default_video_row() -> Dict[str, str]:
         "Subscribers": "not-given",
         "Tags": "",
     }
+
+
+def _normalize_numeric_label(text: str, default: str = "not-given") -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return default
+    raw_lc = raw.lower()
+    if "turned off" in raw_lc:
+        return "0"
+    if "no comment" in raw_lc or "no subscriber" in raw_lc:
+        return "0"
+    match = re.search(r"([0-9]*\.?[0-9]+)\s*([kmb])?\+?", raw_lc)
+    if not match:
+        return default
+    number = float(match.group(1))
+    suffix = (match.group(2) or "").lower()
+    multiplier = 1
+    has_suffix = False
+    if suffix == "k":
+        multiplier = 1_000
+        has_suffix = True
+    elif suffix == "m":
+        multiplier = 1_000_000
+        has_suffix = True
+    elif suffix == "b":
+        multiplier = 1_000_000_000
+        has_suffix = True
+    value = int(number * multiplier)
+    return f"{value:,}+" if has_suffix else f"{value:,}"
 
 
 def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url: str = "") -> Dict[str, str]:
@@ -77,7 +124,7 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
         proxies = to_requests_proxies(normalized_proxy)
 
     if video_key:
-        response = requests.get(
+        response = _http_get(
             "https://www.youtube.com/watch",
             params={"v": video_key, "hl": "en"},
             headers=headers,
@@ -85,7 +132,7 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
             proxies=proxies,
         )
     else:
-        response = requests.get(
+        response = _http_get(
             watch_url,
             headers=headers,
             timeout=25,
@@ -93,6 +140,49 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
         )
     response.raise_for_status()
     page_html = _response_text_utf8(response)
+
+    def _extract_text(field) -> str:
+        if not isinstance(field, dict):
+            return ""
+        if "simpleText" in field:
+            return str(field.get("simpleText", "")).strip()
+        runs = field.get("runs", [])
+        if isinstance(runs, list):
+            return "".join(str(part.get("text", "")) for part in runs if isinstance(part, dict)).strip()
+        return ""
+
+    def _find_first_key(node, key_name):
+        if isinstance(node, dict):
+            if key_name in node:
+                return node.get(key_name)
+            for value in node.values():
+                found = _find_first_key(value, key_name)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = _find_first_key(item, key_name)
+                if found is not None:
+                    return found
+        return None
+
+    def _parse_age_days(date_text: str) -> int:
+        raw = str(date_text or "").strip()
+        if not raw:
+            return 0
+        try:
+            if "T" in raw:
+                raw = raw.replace("Z", "+00:00")
+                target = datetime.fromisoformat(raw)
+                if target.tzinfo is None:
+                    target = target.replace(tzinfo=timezone.utc)
+                delta = datetime.now(timezone.utc) - target.astimezone(timezone.utc)
+                return max(0, delta.days)
+            target = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            delta = datetime.now(timezone.utc) - target
+            return max(0, delta.days)
+        except Exception:
+            return 0
 
     marker = "var ytInitialPlayerResponse = "
     blob = VideoSearchWorker._extract_json_blob(page_html, marker)
@@ -119,13 +209,43 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
     publish_date = str(microformat.get("publishDate", "")).strip()
     upload_date = str(microformat.get("uploadDate", "")).strip()
     category = str(microformat.get("category", "")).strip()
-    owner_url = str(microformat.get("ownerProfileUrl", "")).strip()
+    owner_url = microformat.get("ownerProfileUrl", "")
+    owner_url = str(owner_url).strip() if owner_url not in (None, "None") else ""
+    average_rating = str(video_details.get("averageRating", "")).strip()
+    keywords = video_details.get("keywords", [])
+    captions = (
+        player.get("captions", {})
+        .get("playerCaptionsTracklistRenderer", {})
+        .get("captionTracks", [])
+        if isinstance(player, dict)
+        else []
+    )
 
     thumb_url = ""
     thumbs = video_details.get("thumbnail", {}).get("thumbnails", [])
     if isinstance(thumbs, list) and thumbs:
         last = thumbs[-1] if isinstance(thumbs[-1], dict) else {}
         thumb_url = VideoSearchWorker._normalize_thumbnail_url(str(last.get("url", "")).strip(), video_key)
+
+    initial_data = VideoSearchWorker(query="details", max_results=1)._extract_initial_data(page_html)
+    owner_renderer = _find_first_key(initial_data, "videoOwnerRenderer")
+    comments_header = _find_first_key(initial_data, "commentsHeaderRenderer")
+    subscriber_text = ""
+    comments_text = ""
+    if isinstance(owner_renderer, dict):
+        subscriber_text = _extract_text(owner_renderer.get("subscriberCountText"))
+    if isinstance(comments_header, dict):
+        comments_text = _extract_text(comments_header.get("countText"))
+
+    publish_exact = upload_date or publish_date
+    age_days = _parse_age_days(publish_exact)
+    view_count_num = int(re.sub(r"[^0-9]", "", view_count)) if re.sub(r"[^0-9]", "", view_count) else 0
+    avg_views_per_day = int(view_count_num / max(1, age_days)) if age_days > 0 else 0
+    tags_text = ", ".join(str(tag).strip() for tag in keywords if str(tag).strip())
+    subtitles = "YES" if captions else "NO"
+
+    normalized_comments = _normalize_numeric_label(comments_text)
+    normalized_subscribers = _normalize_numeric_label(subscriber_text)
 
     details.update(
         {
@@ -134,15 +254,113 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
             "Channel Name": author,
             "Channel ID": channel_id,
             "Channel URL": owner_url or (f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""),
-            "View Count": view_count,
+            "Channel Link": owner_url or (f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""),
+            "View Count": f"{view_count_num:,}" if view_count_num > 0 else view_count,
             "Length Seconds": length_seconds,
             "Publish Date": publish_date,
             "Upload Date": upload_date,
             "Category": category,
             "Thumbnail URL": thumb_url,
+            "Rating": average_rating or "not-given",
+            "Comments": normalized_comments,
+            "Published": publish_exact or "not-given",
+            "Published Age (Days)": str(age_days) if age_days > 0 else "not-given",
+            "Avg. Views per Day": f"{avg_views_per_day:,}" if avg_views_per_day > 0 else "0",
+            "Subtitles": subtitles,
+            "Channel": author,
+            "Subscribers": normalized_subscribers,
+            "Tags": tags_text,
         }
     )
+
+    if yt_dlp is not None and (
+        details.get("Comments", "not-given") == "not-given"
+        or details.get("Subscribers", "not-given") == "not-given"
+        or details.get("Published", "not-given") == "not-given"
+    ):
+        original_proxy_values = {k: os.environ.pop(k, None) for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
+        try:
+            ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True, "proxy": ""}
+            normalized_proxy = normalize_proxy(proxy_url)
+            if normalized_proxy:
+                ydl_opts["proxy"] = normalized_proxy
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_link or f"https://www.youtube.com/watch?v={video_key}", download=False)
+            if info:
+                comment_count = info.get("comment_count")
+                if comment_count is not None and details.get("Comments", "not-given") == "not-given":
+                    details["Comments"] = f"{int(comment_count):,}"
+                follower_count = info.get("channel_follower_count")
+                if follower_count is not None and details.get("Subscribers", "not-given") == "not-given":
+                    details["Subscribers"] = f"{int(follower_count):,}"
+                upload_date_raw = str(info.get("upload_date", "")).strip()
+                if upload_date_raw and details.get("Published", "not-given") == "not-given":
+                    if len(upload_date_raw) == 8 and upload_date_raw.isdigit():
+                        details["Published"] = f"{upload_date_raw[:4]}-{upload_date_raw[4:6]}-{upload_date_raw[6:]}"
+                if details.get("Published", "not-given") != "not-given":
+                    age_days = _parse_age_days(details["Published"])
+                    details["Published Age (Days)"] = str(age_days) if age_days > 0 else "not-given"
+                    views_digits = re.sub(r"[^0-9]", "", str(details.get("View Count", "")))
+                    view_count_num = int(views_digits) if views_digits else 0
+                    details["Avg. Views per Day"] = f"{int(view_count_num / max(1, age_days)):,}" if age_days > 0 else "0"
+        except Exception:
+            pass
+        finally:
+            for key, value in original_proxy_values.items():
+                if value:
+                    os.environ[key] = value
+
     return details
+
+
+class VideoMetadataEnrichWorker(QThread):
+    row_enriched_signal = pyqtSignal(str, dict)
+    status_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, rows: List[dict], proxy_url: str = ""):
+        super().__init__()
+        self.rows = [dict(row) for row in (rows or []) if isinstance(row, dict)]
+        self.proxy_url = str(proxy_url or "").strip()
+        self._running = True
+        self.max_workers = 2
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        total = len(self.rows)
+        if total == 0:
+            self.finished_signal.emit({"count": 0, "updated": 0, "stopped": False})
+            return
+
+        updated = 0
+        workers = max(1, min(self.max_workers, total))
+
+        def _task(payload):
+            video_id = str(payload.get("Video ID", "")).strip()
+            video_link = str(payload.get("Video Link", "")).strip()
+            title = str(payload.get("Title", "")).strip() or video_id or "video"
+            details = fetch_video_page_details(video_id=video_id, video_link=video_link, proxy_url=self.proxy_url)
+            return video_id, title, details
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(_task, row): idx for idx, row in enumerate(self.rows, start=1)}
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                if not self._running:
+                    self.finished_signal.emit({"count": total, "updated": updated, "stopped": True})
+                    return
+                try:
+                    video_id, title, details = future.result()
+                    self.status_signal.emit(f"Enriched metadata {idx}/{total}: {title}")
+                    if details:
+                        self.row_enriched_signal.emit(video_id, details)
+                        updated += 1
+                except Exception as exc:
+                    self.error_signal.emit(f"Metadata enrich failed: {str(exc).strip() or 'unknown error'}")
+        self.finished_signal.emit({"count": total, "updated": updated, "stopped": False})
 
 
 class _DownloadStopped(Exception):
@@ -346,6 +564,41 @@ class VideoSearchWorker(QThread):
         return VideoSearchWorker._normalize_thumbnail_url(raw_url)
 
     @staticmethod
+    def _extract_channel_name(field: Optional[dict]) -> str:
+        return VideoSearchWorker._extract_text(field)
+
+    @staticmethod
+    def _extract_channel_link(field: Optional[dict]) -> str:
+        if not isinstance(field, dict):
+            return ""
+        runs = field.get("runs", [])
+        if not isinstance(runs, list) or not runs:
+            return ""
+        first = runs[0] if isinstance(runs[0], dict) else {}
+        browse_id = (
+            first.get("navigationEndpoint", {})
+            .get("browseEndpoint", {})
+            .get("browseId", "")
+        )
+        browse_id = str(browse_id or "").strip()
+        if browse_id:
+            return f"https://www.youtube.com/channel/{browse_id}"
+        return ""
+
+    @staticmethod
+    def _parse_length_seconds(text: str) -> int:
+        raw = str(text or "").strip()
+        if not raw:
+            return 0
+        parts = [p for p in raw.split(":") if p.strip().isdigit()]
+        if not parts:
+            return 0
+        total = 0
+        for part in parts:
+            total = (total * 60) + int(part)
+        return total
+
+    @staticmethod
     def _extract_video_id_from_thumbnail_url(thumb_url: str) -> str:
         match = re.search(r"/vi(?:_webp)?/([^/]+)/", str(thumb_url or ""))
         if not match:
@@ -503,7 +756,7 @@ class VideoSearchWorker(QThread):
             ),
             "Accept-Language": "en-US,en;q=0.9",
         }
-        response = requests.get(
+        response = _http_get(
             "https://www.youtube.com/watch",
             params={"v": video_key, "hl": "en"},
             headers=headers,
@@ -584,7 +837,7 @@ class VideoSearchWorker(QThread):
             "hl": "en",
         }
 
-        response = requests.get(
+        response = _http_get(
             "https://www.youtube.com/results",
             params=params,
             headers=headers,
@@ -628,6 +881,17 @@ class VideoSearchWorker(QThread):
                 renderer.get("shortViewCountText")
             )
             published_text = self._extract_text(renderer.get("publishedTimeText"))
+            channel_name = self._extract_channel_name(renderer.get("ownerText")) or self._extract_channel_name(
+                renderer.get("longBylineText")
+            )
+            channel_link = self._extract_channel_link(renderer.get("ownerText")) or self._extract_channel_link(
+                renderer.get("longBylineText")
+            )
+            length_text = self._extract_text(renderer.get("lengthText"))
+            view_count_num = self._parse_view_count_number(view_text)
+            age_seconds = self._parse_age_seconds(published_text)
+            age_days = int(age_seconds / 86400) if age_seconds < 10**11 else 0
+            avg_views_per_day = int(view_count_num / max(1, age_days)) if age_days > 0 else 0
 
             payload = {
                 "Video ID": video_id,
@@ -636,14 +900,31 @@ class VideoSearchWorker(QThread):
                 "Search Phrase": self.query,
                 "Title": title,
                 "Description": description,
-                "_view_count": self._parse_view_count_number(view_text),
-                "_age_seconds": self._parse_age_seconds(published_text),
+                "_view_count": view_count_num,
+                "_age_seconds": age_seconds,
                 "_published_text": published_text,
                 "Thumbnail URL": self._normalize_thumbnail_url(
                     self._extract_thumbnail_url(renderer.get("thumbnail")),
                     video_id=video_id,
                 ),
+                "View Count": f"{view_count_num:,}" if view_count_num > 0 else "not-given",
+                "Length Seconds": str(self._parse_length_seconds(length_text) or "not-given"),
+                "Published": published_text or "not-given",
+                "Published Age (Days)": str(age_days) if age_days > 0 else "not-given",
+                "Avg. Views per Day": f"{avg_views_per_day:,}" if avg_views_per_day > 0 else "0",
+                "Subtitles": "YES" if self.require_subtitles else "not-given",
+                "Channel": channel_name,
+                "Channel Link": channel_link,
             }
+            payload.update(_default_video_row())
+            payload["Length Seconds"] = str(self._parse_length_seconds(length_text) or "not-given")
+            payload["View Count"] = f"{view_count_num:,}" if view_count_num > 0 else "not-given"
+            payload["Published"] = published_text or "not-given"
+            payload["Published Age (Days)"] = str(age_days) if age_days > 0 else "not-given"
+            payload["Avg. Views per Day"] = f"{avg_views_per_day:,}" if avg_views_per_day > 0 else "0"
+            payload["Subtitles"] = "YES" if self.require_subtitles else "not-given"
+            payload["Channel"] = channel_name
+            payload["Channel Link"] = channel_link
             seen_ids.add(video_id)
             results.append(payload)
             if len(results) >= self.max_results:
@@ -729,7 +1010,7 @@ class ImportedLinksMetadataWorker(QThread):
 
         params = {"url": video_link, "format": "json"}
         endpoint = f"https://www.youtube.com/oembed?{urlencode(params)}"
-        response = requests.get(endpoint, timeout=15, proxies=self._next_requests_proxies())
+        response = _http_get(endpoint, timeout=15, proxies=self._next_requests_proxies())
         response.raise_for_status()
         payload = response.json()
         return {
@@ -784,6 +1065,7 @@ class ImportedLinksMetadataWorker(QThread):
                 author = meta.get("author_name", "")
                 if author:
                     row["Source"] = f"Imported ({author})"
+                    row["Channel"] = author
                 thumb = meta.get("thumbnail_url", "")
                 if thumb:
                     row["Thumbnail URL"] = VideoSearchWorker._normalize_thumbnail_url(
@@ -888,7 +1170,7 @@ class TrendingVideosWorker(QThread):
             ),
             "Accept-Language": "en-US,en;q=0.9",
         }
-        response = requests.get(url, headers=headers, timeout=25, proxies=self._next_requests_proxies())
+        response = _http_get(url, headers=headers, timeout=25, proxies=self._next_requests_proxies())
         if response.status_code >= 400:
             return []
 
@@ -922,6 +1204,7 @@ class TrendingVideosWorker(QThread):
                     "Title": title,
                     "Description": "",
                     "Thumbnail URL": VideoSearchWorker._normalize_thumbnail_url("", video_id=video_id),
+                    **_default_video_row(),
                 }
             )
             seen_ids.add(video_id)
@@ -978,9 +1261,25 @@ class TrendingVideosWorker(QThread):
                     if isinstance(snippets, list) and snippets:
                         snippet_text = snippets[0].get("snippetText") if isinstance(snippets[0], dict) else {}
                         description = parser._extract_text(snippet_text)
+                channel_name = parser._extract_channel_name(renderer.get("ownerText")) or parser._extract_channel_name(
+                    renderer.get("longBylineText")
+                )
+                channel_link = parser._extract_channel_link(renderer.get("ownerText")) or parser._extract_channel_link(
+                    renderer.get("longBylineText")
+                )
+                view_text = parser._extract_text(renderer.get("viewCountText")) or parser._extract_text(
+                    renderer.get("shortViewCountText")
+                )
+                published_text = parser._extract_text(renderer.get("publishedTimeText"))
+                length_text = parser._extract_text(renderer.get("lengthText"))
+                view_count_num = parser._parse_view_count_number(view_text)
+                age_seconds = parser._parse_age_seconds(published_text)
+                age_days = int(age_seconds / 86400) if age_seconds < 10**11 else 0
+                avg_views_per_day = int(view_count_num / max(1, age_days)) if age_days > 0 else 0
 
                 rows.append(
                     {
+                        **_default_video_row(),
                         "Video ID": video_id,
                         "Video Link": f"https://www.youtube.com/watch?v={video_id}",
                         "Source": source_name,
@@ -991,6 +1290,13 @@ class TrendingVideosWorker(QThread):
                             parser._extract_thumbnail_url(renderer.get("thumbnail")),
                             video_id=video_id,
                         ),
+                        "View Count": f"{view_count_num:,}" if view_count_num > 0 else "not-given",
+                        "Length Seconds": str(parser._parse_length_seconds(length_text) or "not-given"),
+                        "Published": published_text or "not-given",
+                        "Published Age (Days)": str(age_days) if age_days > 0 else "not-given",
+                        "Avg. Views per Day": f"{avg_views_per_day:,}" if avg_views_per_day > 0 else "0",
+                        "Channel": channel_name,
+                        "Channel Link": channel_link,
                     }
                 )
                 seen_ids.add(video_id)
@@ -999,7 +1305,7 @@ class TrendingVideosWorker(QThread):
             return rows
 
         primary_params = {"gl": self.region_code, "hl": "en", "persist_gl": "1", "persist_hl": "1"}
-        primary_response = requests.get(
+        primary_response = _http_get(
             "https://www.youtube.com/feed/trending",
             params=primary_params,
             headers=headers,
@@ -1031,7 +1337,7 @@ class TrendingVideosWorker(QThread):
         fallback_query = fallback_query_by_region.get(self.region_code, "trending videos")
         fallback_hl = "vi" if self.region_code == "VN" else "en"
 
-        fallback_response = requests.get(
+        fallback_response = _http_get(
             "https://www.youtube.com/results",
             params={
                 "search_query": fallback_query,

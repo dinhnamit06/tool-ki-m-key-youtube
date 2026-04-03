@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPixmap, QTextOption
 from PyQt6.QtWidgets import (
     QApplication,
@@ -15,36 +15,102 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QSizePolicy,
     QSlider,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
     QHeaderView,
+    QSplitter,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 import os
 import webbrowser
 import re
 from collections import Counter
-from urllib.parse import parse_qs, urlparse
+from html import unescape
+from urllib.parse import parse_qs, urlparse, urljoin
 
 from core.videos_fetcher import (
     ImportedLinksMetadataWorker,
     TrendingVideosWorker,
     VideoDownloadWorker,
+    VideoMetadataEnrichWorker,
     VideoSearchWorker,
     fetch_video_page_details,
 )
-from utils.constants import REQUESTS_INSTALLED
+from utils.constants import REQUESTS_INSTALLED, TABLE_SCROLLBAR_STYLE
 
 try:
     import requests
 except ImportError:  # pragma: no cover
     requests = None
+
+
+VIDEO_TABLE_COLUMNS = [
+    "",
+    "Image",
+    "Video ID",
+    "Video Link",
+    "Source",
+    "Search Phrase",
+    "Title",
+    "Description",
+    "Rating",
+    "Comments",
+    "View Count",
+    "Length Seconds",
+    "Published",
+    "Published Age (Days)",
+    "Avg. Views per Day",
+    "Category",
+    "Subtitles",
+    "Channel",
+    "Channel Link",
+    "Subscribers",
+    "Tags",
+]
+
+VIDEO_COLUMN_INDEX = {name: idx for idx, name in enumerate(VIDEO_TABLE_COLUMNS)}
+VIDEO_TEXT_COLUMNS = [name for name in VIDEO_TABLE_COLUMNS[2:]]
+VIDEO_DEFAULT_COLUMN_WIDTHS = {
+    0: 26,
+    1: 94,
+    2: 112,
+    3: 240,
+    4: 90,
+    5: 130,
+    6: 300,
+    7: 240,
+    8: 82,
+    9: 100,
+    10: 118,
+    11: 110,
+    12: 120,
+    13: 130,
+    14: 138,
+    15: 120,
+    16: 86,
+    17: 180,
+    18: 210,
+    19: 110,
+    20: 260,
+}
+VIDEO_NUMERIC_FILTERABLE_COLUMNS = {
+    "Rating",
+    "Comments",
+    "View Count",
+    "Length Seconds",
+    "Published Age (Days)",
+    "Avg. Views per Day",
+    "Subscribers",
+}
 
 
 class ThumbnailFallbackWorker(QThread):
@@ -227,6 +293,997 @@ class VideosSearchDialog(QDialog):
         )
 
 
+class VideoNumericFilterDialog(QDialog):
+    def __init__(self, parent=None, column_name="", current_expression=""):
+        super().__init__(parent)
+        self.column_name = str(column_name or "").strip()
+        self._clear_requested = False
+        self.setWindowTitle(f"Filter {self.column_name}")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        title = QLabel(f"Numeric filter for: {self.column_name}")
+        title.setStyleSheet("QLabel { color:#ffffff; font-size:14px; font-weight:700; }")
+        root.addWidget(title)
+
+        hint = QLabel("Examples: `>500000`, `>=10000`, `<60`, `=0`, `!=100`")
+        hint.setStyleSheet("QLabel { color:#aab3c5; font-size:12px; }")
+        root.addWidget(hint)
+
+        self.input_expression = QLineEdit()
+        self.input_expression.setPlaceholderText("Enter numeric condition...")
+        self.input_expression.setText(str(current_expression or "").strip())
+        root.addWidget(self.input_expression)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.btn_clear = QPushButton("Clear Filter")
+        self.btn_clear.clicked.connect(self._clear_filter)
+        btn_row.addWidget(self.btn_clear)
+        btn_row.addStretch()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        btn_row.addWidget(buttons)
+        root.addLayout(btn_row)
+
+        self.setStyleSheet(
+            "QDialog { background-color:#181b22; color:#f3f4f6; }"
+            "QLabel { color:#f3f4f6; }"
+            "QLineEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:4px; padding:6px 8px; }"
+            "QPushButton { background-color:#2d3342; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; }"
+            "QPushButton:hover { background-color:#3c4356; }"
+            "QDialogButtonBox QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
+            "QDialogButtonBox QPushButton:hover { background-color:#ff1a25; }"
+        )
+
+    def _clear_filter(self):
+        self._clear_requested = True
+        self.accept()
+
+    def selected_expression(self):
+        if self._clear_requested:
+            return None
+        return self.input_expression.text().strip()
+
+
+class VideoTagsAnalyzeWorker(QThread):
+    progress_signal = pyqtSignal(int, int)
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, rows=None):
+        super().__init__()
+        self.rows = [dict(row) for row in (rows or []) if isinstance(row, dict)]
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    @staticmethod
+    def _parse_number(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return 0.0
+        match = re.search(r"-?\d+(?:\.\d+)?", text.replace(",", "").replace("+", ""))
+        if not match:
+            return 0.0
+        try:
+            return float(match.group(0))
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _split_tags(tag_text):
+        parts = re.split(r"[,;\n\r]+", str(tag_text or ""))
+        seen = set()
+        ordered = []
+        for part in parts:
+            tag = re.sub(r"\s+", " ", str(part).strip()).strip("# ").strip()
+            if not tag:
+                continue
+            key = tag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append((key, tag))
+        return ordered
+
+    def run(self):
+        total_videos = len(self.rows)
+        if total_videos == 0:
+            self.finished_signal.emit({"total_videos": 0, "total_channels": 0, "total_occurrences": 0, "rows": []})
+            return
+
+        unique_channels = set()
+        aggregates = {}
+        total_occurrences = 0
+
+        for index, row in enumerate(self.rows, start=1):
+            if not self._running:
+                break
+
+            channel_name = str(row.get("Channel", "")).strip()
+            if channel_name:
+                unique_channels.add(channel_name.lower())
+
+            view_count = self._parse_number(row.get("View Count", ""))
+            likes_count = self._parse_number(row.get("Likes", ""))
+            tags = self._split_tags(row.get("Tags", ""))
+
+            for tag_key, tag_label in tags:
+                entry = aggregates.setdefault(
+                    tag_key,
+                    {"tag": tag_label, "occurrences": 0, "view_sum": 0.0, "likes_sum": 0.0},
+                )
+                entry["occurrences"] += 1
+                entry["view_sum"] += view_count
+                entry["likes_sum"] += likes_count
+                total_occurrences += 1
+
+            self.progress_signal.emit(index, total_videos)
+
+        rows = []
+        for entry in aggregates.values():
+            occurrences = int(entry["occurrences"])
+            percentage = (occurrences / total_videos) * 100.0 if total_videos else 0.0
+            avg_views = entry["view_sum"] / max(1, occurrences)
+            avg_likes = entry["likes_sum"] / max(1, occurrences)
+            rows.append(
+                {
+                    "tag": entry["tag"],
+                    "occurrences": occurrences,
+                    "percentage": percentage,
+                    "avg_views": avg_views,
+                    "avg_likes": avg_likes,
+                }
+            )
+
+        rows.sort(key=lambda item: (-item["occurrences"], item["tag"].lower()))
+        self.finished_signal.emit(
+            {
+                "total_videos": total_videos,
+                "total_channels": len(unique_channels),
+                "total_occurrences": total_occurrences,
+                "rows": rows,
+            }
+        )
+
+
+class AnalyzeVideoTagsDialog(QDialog):
+    TABLE_COLUMNS = [
+        "",
+        "Tags",
+        "Occurrences in Listings",
+        "Percentage in Listings",
+        "Avg. Views per Tag",
+        "Avg. Likes per Tag",
+    ]
+    NUMERIC_COLUMNS = {
+        "Occurrences in Listings",
+        "Percentage in Listings",
+        "Avg. Views per Tag",
+        "Avg. Likes per Tag",
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._worker = None
+        self._all_tag_rows = []
+        self._numeric_filters = {}
+        self.setWindowTitle("Analyze Video Tags")
+        self.setModal(True)
+        self.resize(980, 640)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+
+        self.card_total_videos = self._make_metric_card("Total\nVideos:", "0")
+        self.card_total_channels = self._make_metric_card("Total\nChannels:", "0")
+        top_row.addWidget(self.card_total_videos)
+        top_row.addWidget(self.card_total_channels)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(18)
+        self.progress.setStyleSheet(
+            "QProgressBar { background:#e8edf5; border:1px solid #d0d7e2; border-radius:4px; }"
+            "QProgressBar::chunk { background:#4a90e2; border-radius:4px; }"
+        )
+        top_row.addWidget(self.progress, stretch=1)
+        root.addLayout(top_row)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.TABLE_COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.TABLE_COLUMNS)
+        self.table.setRowCount(0)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.setStyleSheet(
+            "QTableWidget { background:#ffffff; color:#111111; gridline-color:#d8d8d8; border:1px solid #cfcfcf; }"
+            "QHeaderView::section { background:#f0f0f0; color:#111111; border:1px solid #d0d0d0; font-weight:700; padding:4px; }"
+            + TABLE_SCROLLBAR_STYLE
+        )
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.sectionClicked.connect(self._on_header_clicked)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(0, 26)
+        self.table.setColumnWidth(1, 210)
+        self.table.setColumnWidth(2, 170)
+        self.table.setColumnWidth(3, 170)
+        self.table.setColumnWidth(4, 170)
+        self.table.setColumnWidth(5, 160)
+        root.addWidget(self.table, stretch=1)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+
+        self.lbl_total = QLabel("Total: 0")
+        self.lbl_total.setStyleSheet("QLabel { color:#111111; font-size:12px; }")
+        bottom_row.addWidget(self.lbl_total)
+        bottom_row.addStretch()
+
+        self.btn_file = QPushButton("File")
+        self.btn_clear_filters = QPushButton("Clear Filters")
+        self.btn_clear = QPushButton("Clear")
+        self.btn_close = QPushButton("Close")
+        for btn in (self.btn_file, self.btn_clear_filters, self.btn_clear, self.btn_close):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
+                "QPushButton:hover { background-color:#ff1a25; }"
+            )
+        self.btn_close.clicked.connect(self.accept)
+        bottom_row.addWidget(self.btn_file)
+        bottom_row.addWidget(self.btn_clear_filters)
+        bottom_row.addWidget(self.btn_clear)
+        bottom_row.addWidget(self.btn_close)
+        root.addLayout(bottom_row)
+
+        self.setStyleSheet("QDialog { background:#ffffff; }")
+        self._refresh_header_filter_tooltips()
+
+    def _make_metric_card(self, title, value):
+        frame = QFrame()
+        frame.setFixedWidth(150)
+        frame.setStyleSheet("QFrame { background:#e24a22; border:1px solid #c73a16; }")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet("QLabel { color:#ffffff; font-size:14px; font-weight:700; }")
+        lbl_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(lbl_title, stretch=1)
+
+        lbl_value = QLabel(value)
+        lbl_value.setStyleSheet("QLabel { color:#ffffff; font-size:24px; font-weight:700; }")
+        lbl_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(lbl_value)
+
+        frame._value_label = lbl_value
+        return frame
+
+    def set_metric_values(self, total_videos=0, total_channels=0):
+        self.card_total_videos._value_label.setText(str(int(total_videos)))
+        self.card_total_channels._value_label.setText(str(int(total_channels)))
+
+    def set_progress(self, current, total):
+        total_value = max(1, int(total or 0))
+        current_value = max(0, int(current or 0))
+        self.progress.setValue(int((current_value / total_value) * 100))
+
+    def populate_rows(self, payload):
+        data = dict(payload or {})
+        rows = list(data.get("rows", []))
+        self._all_tag_rows = rows
+        self.set_metric_values(data.get("total_videos", 0), data.get("total_channels", 0))
+        self.progress.setValue(100 if rows else 0)
+        self._render_rows(self._filtered_rows(rows))
+        self.lbl_total.setText(f"Total: {int(data.get('total_occurrences', 0)):,}")
+
+    def _render_rows(self, rows):
+        self.table.setRowCount(0)
+        for row_data in rows:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            checkbox_item = QTableWidgetItem("")
+            checkbox_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+            self.table.setItem(row, 0, checkbox_item)
+
+            values = [
+                str(row_data.get("tag", "")),
+                f"{int(row_data.get('occurrences', 0)):,}",
+                f"{float(row_data.get('percentage', 0.0)):.1f}",
+                f"{float(row_data.get('avg_views', 0.0)):,.1f}",
+                f"{float(row_data.get('avg_likes', 0.0)):,.1f}",
+            ]
+            for offset, value in enumerate(values, start=1):
+                item = QTableWidgetItem(value)
+                if offset >= 2:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, offset, item)
+
+    def clear_results(self):
+        self.set_metric_values(0, 0)
+        self.progress.setValue(0)
+        self.table.setRowCount(0)
+        self._all_tag_rows = []
+        self._numeric_filters = {}
+        self._refresh_header_filter_tooltips()
+        self.lbl_total.setText("Total: 0")
+
+    def reset_filters(self):
+        self._numeric_filters = {}
+        self._refresh_header_filter_tooltips()
+        self._render_rows(self._all_tag_rows)
+
+    @staticmethod
+    def _parse_number(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", text.replace(",", "").replace("+", ""))
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _evaluate_expression(value, expression):
+        expr = str(expression or "").strip()
+        if not expr:
+            return True
+        match = re.fullmatch(r"(>=|<=|!=|==|=|>|<)\s*(-?\d+(?:\.\d+)?)", expr)
+        if not match:
+            return None
+        operator = match.group(1)
+        target = float(match.group(2))
+        if operator == ">":
+            return value > target
+        if operator == "<":
+            return value < target
+        if operator == ">=":
+            return value >= target
+        if operator == "<=":
+            return value <= target
+        if operator in {"=", "=="}:
+            return value == target
+        if operator == "!=":
+            return value != target
+        return None
+
+    def _filtered_rows(self, rows):
+        results = []
+        for row in rows:
+            matched = True
+            for column_name, expression in self._numeric_filters.items():
+                if column_name == "Occurrences in Listings":
+                    value = self._parse_number(row.get("occurrences", 0))
+                elif column_name == "Percentage in Listings":
+                    value = self._parse_number(row.get("percentage", 0.0))
+                elif column_name == "Avg. Views per Tag":
+                    value = self._parse_number(row.get("avg_views", 0.0))
+                elif column_name == "Avg. Likes per Tag":
+                    value = self._parse_number(row.get("avg_likes", 0.0))
+                else:
+                    value = None
+                if value is None or self._evaluate_expression(value, expression) is not True:
+                    matched = False
+                    break
+            if matched:
+                results.append(row)
+        return results
+
+    def _refresh_header_filter_tooltips(self):
+        for index, column_name in enumerate(self.TABLE_COLUMNS):
+            item = self.table.horizontalHeaderItem(index)
+            if item is None:
+                continue
+            if column_name in self.NUMERIC_COLUMNS:
+                expr = str(self._numeric_filters.get(column_name, "")).strip()
+                item.setToolTip(f"Active filter: {expr}" if expr else "Click to filter this numeric column")
+            else:
+                item.setToolTip("")
+
+    def _on_header_clicked(self, section):
+        if section < 0 or section >= len(self.TABLE_COLUMNS):
+            return
+        column_name = self.TABLE_COLUMNS[section]
+        if column_name not in self.NUMERIC_COLUMNS:
+            return
+
+        dlg = VideoNumericFilterDialog(
+            self,
+            column_name=column_name,
+            current_expression=self._numeric_filters.get(column_name, ""),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        expression = dlg.selected_expression()
+        if expression is None or not str(expression).strip():
+            self._numeric_filters.pop(column_name, None)
+        else:
+            if self._evaluate_expression(1.0, expression) is None:
+                QMessageBox.warning(
+                    self,
+                    "Analyze Video Tags",
+                    "Numeric filter format is invalid. Use examples like >500000, >=1000, <60, =0.",
+                )
+                return
+            self._numeric_filters[column_name] = str(expression).strip()
+
+        self._refresh_header_filter_tooltips()
+        self._render_rows(self._filtered_rows(self._all_tag_rows))
+
+    def closeEvent(self, event):
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.stop()
+            self._worker.wait(1000)
+        super().closeEvent(event)
+
+
+DEFAULT_STOP_WORDS = [
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
+    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
+    "below", "between", "both", "but", "by", "can", "could", "did", "do", "does",
+    "doing", "down", "during", "each", "few", "for", "from", "further", "had", "has",
+    "have", "having", "he", "her", "here", "hers", "herself", "him", "himself", "his",
+    "how", "i", "if", "in", "into", "is", "it", "its", "itself", "just",
+    "me", "more", "most", "my", "myself", "no", "nor", "not", "now", "of",
+    "off", "on", "once", "only", "or", "other", "our", "ours", "ourselves", "out",
+    "over", "own", "same", "she", "should", "so", "some", "such", "than", "that",
+    "the", "their", "theirs", "them", "themselves", "then", "there", "these", "they", "this",
+    "those", "through", "to", "too", "under", "until", "up", "very", "was", "we",
+    "were", "what", "when", "where", "which", "while", "who", "whom", "why", "with",
+    "would", "you", "your", "yours", "yourself", "yourselves",
+]
+
+
+class StopWordsDialog(QDialog):
+    def __init__(self, parent=None, stop_words=None):
+        super().__init__(parent)
+        self.setWindowTitle("Stop Words")
+        self.setModal(True)
+        self.resize(520, 520)
+
+        words = [str(word).strip() for word in (stop_words or DEFAULT_STOP_WORDS) if str(word).strip()]
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        lbl_help = QLabel(
+            "These are words or word phrases you do not want to\n"
+            "appear in your word analysis data. Enter one word or\n"
+            "word phrase per line."
+        )
+        lbl_help.setStyleSheet("QLabel { color:#111111; font-size:13px; }")
+        root.addWidget(lbl_help)
+
+        self.text_words = QTextEdit()
+        self.text_words.setPlainText("\n".join(words))
+        self.text_words.setStyleSheet(
+            "QTextEdit { background:#ffffff; color:#111111; border:1px solid #cfcfcf; border-radius:2px; padding:6px; }"
+        )
+        root.addWidget(self.text_words, stretch=1)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+
+        self.lbl_total = QLabel(f"Total: {len(words)}")
+        self.lbl_total.setStyleSheet("QLabel { color:#111111; font-size:12px; }")
+        bottom_row.addWidget(self.lbl_total)
+        bottom_row.addStretch()
+
+        self.btn_file = QPushButton("File")
+        self.btn_ok = QPushButton("Ok")
+        self.btn_cancel = QPushButton("Cancel")
+        for btn in (self.btn_file, self.btn_ok, self.btn_cancel):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
+                "QPushButton:hover { background-color:#ff1a25; }"
+            )
+
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.text_words.textChanged.connect(self._refresh_total)
+
+        bottom_row.addWidget(self.btn_file)
+        bottom_row.addWidget(self.btn_ok)
+        bottom_row.addWidget(self.btn_cancel)
+        root.addLayout(bottom_row)
+
+        self.setStyleSheet("QDialog { background:#ffffff; }")
+
+    def _refresh_total(self):
+        count = len([line for line in self.text_words.toPlainText().splitlines() if line.strip()])
+        self.lbl_total.setText(f"Total: {count}")
+
+    def stop_words(self):
+        ordered = []
+        seen = set()
+        for raw_line in self.text_words.toPlainText().splitlines():
+            text = re.sub(r"\s+", " ", str(raw_line).strip()).strip().lower()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            ordered.append(text)
+        return ordered
+
+
+class VideoTitleKeywordsAnalyzeWorker(QThread):
+    progress_signal = pyqtSignal(int, int)
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, rows=None, word_count=1, use_stop_words=True, stop_words=None):
+        super().__init__()
+        self.rows = [dict(row) for row in (rows or []) if isinstance(row, dict)]
+        self.word_count = max(1, int(word_count or 1))
+        self.use_stop_words = bool(use_stop_words)
+        self.stop_words = [str(word).strip().lower() for word in (stop_words or []) if str(word).strip()]
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    @staticmethod
+    def _parse_number(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return 0.0
+        lowered = text.lower()
+        if lowered in {"not-given", "n/a", "-", "none"}:
+            return 0.0
+        cleaned = text.replace(",", "").replace("+", "").strip()
+        match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+        if not match:
+            return 0.0
+        try:
+            return float(match.group(0))
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _tokenize_title(title_text):
+        return [
+            token.lower()
+            for token in re.findall(r"[^\W_]+", str(title_text or ""), flags=re.UNICODE)
+            if token and not token.isdigit()
+        ]
+
+    @staticmethod
+    def _normalize_phrase(text):
+        return re.sub(r"\s+", " ", str(text or "").strip()).strip().lower()
+
+    def _is_blocked_phrase(self, tokens, stop_single, stop_phrases):
+        phrase = " ".join(tokens).strip().lower()
+        if not phrase:
+            return True
+        if phrase in stop_phrases:
+            return True
+        return any(token in stop_single for token in tokens)
+
+    def run(self):
+        total_titles = len(self.rows)
+        if total_titles <= 0:
+            self.finished_signal.emit({"total_titles": 0, "rows": []})
+            return
+
+        stop_single = {word for word in self.stop_words if " " not in word}
+        stop_phrases = {word for word in self.stop_words if " " in word}
+        aggregates = {}
+
+        for index, row in enumerate(self.rows, start=1):
+            if not self._running:
+                break
+
+            title_text = str(row.get("Title", "")).strip()
+            if not title_text:
+                self.progress_signal.emit(index, total_titles)
+                continue
+
+            tokens = self._tokenize_title(title_text)
+            if len(tokens) < self.word_count:
+                self.progress_signal.emit(index, total_titles)
+                continue
+
+            view_count = self._parse_number(row.get("View Count", ""))
+            likes_count = self._parse_number(row.get("Likes", ""))
+            seen_in_title = set()
+
+            for start in range(0, len(tokens) - self.word_count + 1):
+                phrase_tokens = tokens[start:start + self.word_count]
+                phrase = " ".join(phrase_tokens).strip()
+                if not phrase:
+                    continue
+                if self.use_stop_words and self._is_blocked_phrase(phrase_tokens, stop_single, stop_phrases):
+                    continue
+                if phrase in seen_in_title:
+                    continue
+                seen_in_title.add(phrase)
+
+                entry = aggregates.setdefault(
+                    phrase,
+                    {
+                        "phrase": phrase,
+                        "occurrences": 0,
+                        "view_sum": 0.0,
+                        "likes_sum": 0.0,
+                        "word_count": self.word_count,
+                    },
+                )
+                entry["occurrences"] += 1
+                entry["view_sum"] += view_count
+                entry["likes_sum"] += likes_count
+
+            self.progress_signal.emit(index, total_titles)
+
+        rows = []
+        for entry in aggregates.values():
+            occurrences = int(entry["occurrences"])
+            rows.append(
+                {
+                    "phrase": entry["phrase"],
+                    "occurrences": occurrences,
+                    "percentage": (occurrences / total_titles) * 100.0 if total_titles else 0.0,
+                    "avg_views": entry["view_sum"] / max(1, occurrences),
+                    "avg_likes": entry["likes_sum"] / max(1, occurrences),
+                    "word_count": int(entry["word_count"]),
+                }
+            )
+
+        rows.sort(key=lambda item: (-item["occurrences"], item["phrase"]))
+        self.finished_signal.emit({"total_titles": total_titles, "rows": rows})
+
+
+class AnalyzeVideoTitleKeywordsDialog(QDialog):
+    TABLE_COLUMNS = [
+        "",
+        "Word Combination",
+        "Occurrences in Titles",
+        "Percentage in Titles",
+        "Avg. Views",
+        "Avg. Likes",
+        "Number of Words",
+    ]
+    NUMERIC_COLUMNS = {
+        "Occurrences in Titles",
+        "Percentage in Titles",
+        "Avg. Views",
+        "Avg. Likes",
+        "Number of Words",
+    }
+
+    def __init__(self, parent=None, stop_words=None):
+        super().__init__(parent)
+        self._worker = None
+        self._all_word_rows = []
+        self._numeric_filters = {}
+        self._stop_words = [str(word).strip().lower() for word in (stop_words or DEFAULT_STOP_WORDS) if str(word).strip()]
+        self.setWindowTitle("Analyze Titles")
+        self.setModal(True)
+        self.resize(1120, 650)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+
+        lbl_words = QLabel("Number of words:")
+        lbl_words.setStyleSheet("QLabel { color:#111111; font-size:13px; }")
+        top_row.addWidget(lbl_words)
+
+        self.combo_word_count = QComboBox()
+        self.combo_word_count.addItems([str(i) for i in range(1, 7)])
+        self.combo_word_count.setCurrentText("1")
+        self.combo_word_count.setFixedWidth(64)
+        self.combo_word_count.setStyleSheet(
+            "QComboBox { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:4px 8px; }"
+            "QComboBox::drop-down { border:none; width:18px; }"
+        )
+        top_row.addWidget(self.combo_word_count)
+
+        self.chk_use_stop_words = QCheckBox("Use stop words")
+        self.chk_use_stop_words.setChecked(True)
+        self.chk_use_stop_words.setStyleSheet("QCheckBox { color:#111111; font-size:13px; }")
+        top_row.addWidget(self.chk_use_stop_words)
+
+        self.btn_stop_words = QPushButton("Stop Words")
+        self.btn_stop_words.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_stop_words.setStyleSheet(
+            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
+            "QPushButton:hover { background-color:#ff1a25; }"
+        )
+        top_row.addWidget(self.btn_stop_words)
+
+        top_row.addStretch()
+
+        self.btn_generate = QPushButton("Generate Word Stats")
+        self.btn_generate.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_generate.setStyleSheet(
+            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
+            "QPushButton:hover { background-color:#ff1a25; }"
+        )
+        top_row.addWidget(self.btn_generate)
+        root.addLayout(top_row)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.TABLE_COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.TABLE_COLUMNS)
+        self.table.setRowCount(0)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.setStyleSheet(
+            "QTableWidget { background:#ffffff; color:#111111; gridline-color:#d8d8d8; border:1px solid #cfcfcf; }"
+            "QHeaderView::section { background:#f0f0f0; color:#111111; border:1px solid #d0d0d0; font-weight:700; padding:4px; }"
+            + TABLE_SCROLLBAR_STYLE
+        )
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.sectionClicked.connect(self._on_header_clicked)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        for column in range(1, len(self.TABLE_COLUMNS)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(0, 26)
+        self.table.setColumnWidth(1, 230)
+        self.table.setColumnWidth(2, 170)
+        self.table.setColumnWidth(3, 165)
+        self.table.setColumnWidth(4, 150)
+        self.table.setColumnWidth(5, 150)
+        self.table.setColumnWidth(6, 130)
+        root.addWidget(self.table, stretch=1)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+
+        self.lbl_total = QLabel("Total: 0")
+        self.lbl_total.setStyleSheet("QLabel { color:#111111; font-size:12px; }")
+        bottom_row.addWidget(self.lbl_total)
+        bottom_row.addStretch()
+
+        self.btn_file = QPushButton("File")
+        self.btn_clear_filters = QPushButton("Clear Filters")
+        self.btn_clear = QPushButton("Clear")
+        self.btn_close = QPushButton("Close")
+        for btn in (self.btn_file, self.btn_clear_filters, self.btn_clear, self.btn_close):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
+                "QPushButton:hover { background-color:#ff1a25; }"
+            )
+        self.btn_close.clicked.connect(self.accept)
+        bottom_row.addWidget(self.btn_file)
+        bottom_row.addWidget(self.btn_clear_filters)
+        bottom_row.addWidget(self.btn_clear)
+        bottom_row.addWidget(self.btn_close)
+        root.addLayout(bottom_row)
+
+        self.setStyleSheet("QDialog { background:#ffffff; }")
+        self._refresh_header_filter_tooltips()
+
+    def stop_words(self):
+        return list(self._stop_words)
+
+    def set_stop_words(self, stop_words):
+        self._stop_words = [str(word).strip().lower() for word in (stop_words or []) if str(word).strip()]
+
+    def selected_word_count(self):
+        try:
+            return max(1, int(self.combo_word_count.currentText().strip()))
+        except Exception:
+            return 1
+
+    def set_progress(self, current, total):
+        total_value = max(1, int(total or 0))
+        current_value = max(0, int(current or 0))
+        self.lbl_total.setText(f"Processing: {current_value}/{total_value}")
+
+    def populate_rows(self, payload):
+        data = dict(payload or {})
+        rows = list(data.get("rows", []))
+        self._all_word_rows = rows
+        self._render_rows(self._filtered_rows(rows))
+        self.lbl_total.setText(f"Total: {len(rows):,}")
+        self.btn_generate.setText("Generate Word Stats")
+        self.btn_generate.setEnabled(True)
+
+    def _render_rows(self, rows):
+        self.table.setRowCount(0)
+        for row_data in rows:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            checkbox_item = QTableWidgetItem("")
+            checkbox_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+            self.table.setItem(row, 0, checkbox_item)
+
+            values = [
+                str(row_data.get("phrase", "")),
+                f"{int(row_data.get('occurrences', 0)):,}",
+                f"{float(row_data.get('percentage', 0.0)):.1f}",
+                f"{float(row_data.get('avg_views', 0.0)):,.1f}",
+                f"{float(row_data.get('avg_likes', 0.0)):,.1f}",
+                f"{int(row_data.get('word_count', 0))}",
+            ]
+            for offset, value in enumerate(values, start=1):
+                item = QTableWidgetItem(value)
+                if offset >= 2:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, offset, item)
+
+    def clear_results(self):
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.stop()
+            self._worker.wait(1000)
+        self._worker = None
+        self.table.setRowCount(0)
+        self._all_word_rows = []
+        self._numeric_filters = {}
+        self._refresh_header_filter_tooltips()
+        self.lbl_total.setText("Total: 0")
+        self.btn_generate.setText("Generate Word Stats")
+        self.btn_generate.setEnabled(True)
+
+    def reset_filters(self):
+        self._numeric_filters = {}
+        self._refresh_header_filter_tooltips()
+        self._render_rows(self._all_word_rows)
+        self.lbl_total.setText(f"Total: {len(self._filtered_rows(self._all_word_rows)):,}")
+
+    @staticmethod
+    def _parse_number(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", text.replace(",", "").replace("+", ""))
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _evaluate_expression(value, expression):
+        expr = str(expression or "").strip()
+        if not expr:
+            return True
+        match = re.fullmatch(r"(>=|<=|!=|==|=|>|<)\s*(-?\d+(?:\.\d+)?)", expr)
+        if not match:
+            return None
+        operator = match.group(1)
+        target = float(match.group(2))
+        if operator == ">":
+            return value > target
+        if operator == "<":
+            return value < target
+        if operator == ">=":
+            return value >= target
+        if operator == "<=":
+            return value <= target
+        if operator in {"=", "=="}:
+            return value == target
+        if operator == "!=":
+            return value != target
+        return None
+
+    def _filtered_rows(self, rows):
+        results = []
+        for row in rows:
+            matched = True
+            for column_name, expression in self._numeric_filters.items():
+                if column_name == "Occurrences in Titles":
+                    value = self._parse_number(row.get("occurrences", 0))
+                elif column_name == "Percentage in Titles":
+                    value = self._parse_number(row.get("percentage", 0.0))
+                elif column_name == "Avg. Views":
+                    value = self._parse_number(row.get("avg_views", 0.0))
+                elif column_name == "Avg. Likes":
+                    value = self._parse_number(row.get("avg_likes", 0.0))
+                elif column_name == "Number of Words":
+                    value = self._parse_number(row.get("word_count", 0))
+                else:
+                    value = None
+                if value is None or self._evaluate_expression(value, expression) is not True:
+                    matched = False
+                    break
+            if matched:
+                results.append(row)
+        return results
+
+    def _refresh_header_filter_tooltips(self):
+        for index, column_name in enumerate(self.TABLE_COLUMNS):
+            item = self.table.horizontalHeaderItem(index)
+            if item is None:
+                continue
+            if column_name in self.NUMERIC_COLUMNS:
+                expr = str(self._numeric_filters.get(column_name, "")).strip()
+                item.setToolTip(f"Active filter: {expr}" if expr else "Click to filter this numeric column")
+            else:
+                item.setToolTip("")
+
+    def _on_header_clicked(self, section):
+        if section < 0 or section >= len(self.TABLE_COLUMNS):
+            return
+        column_name = self.TABLE_COLUMNS[section]
+        if column_name not in self.NUMERIC_COLUMNS:
+            return
+
+        dlg = VideoNumericFilterDialog(
+            self,
+            column_name=column_name,
+            current_expression=self._numeric_filters.get(column_name, ""),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        expression = dlg.selected_expression()
+        if expression is None or not str(expression).strip():
+            self._numeric_filters.pop(column_name, None)
+        else:
+            if self._evaluate_expression(1.0, expression) is None:
+                QMessageBox.warning(
+                    self,
+                    "Analyze Titles",
+                    "Numeric filter format is invalid. Use examples like >500000, >=1000, <60, =0.",
+                )
+                return
+            self._numeric_filters[column_name] = str(expression).strip()
+
+        self._refresh_header_filter_tooltips()
+        filtered_rows = self._filtered_rows(self._all_word_rows)
+        self._render_rows(filtered_rows)
+        self.lbl_total.setText(f"Total: {len(filtered_rows):,}")
+
+    def closeEvent(self, event):
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.stop()
+            self._worker.wait(1000)
+        super().closeEvent(event)
+
+
 class VideosAnalyzeDialog(QDialog):
     def __init__(self, parent=None, metrics=None):
         super().__init__(parent)
@@ -305,6 +1362,656 @@ class VideosAnalyzeDialog(QDialog):
             "QDialog { background-color:#181b22; color:#f3f4f6; }"
             "QLabel { color:#ffffff; }"
         )
+
+
+class ConfirmAddLinksDialog(QDialog):
+    def __init__(self, parent=None, link_count=0):
+        super().__init__(parent)
+        self.setWindowTitle("Confirm")
+        self.setModal(True)
+        self.setFixedSize(420, 150)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(12)
+
+        message = QLabel(
+            f"{int(link_count)} links have been added. Click 'Yes' to CLOSE the browser,\n"
+            "or click 'No' to continue browsing."
+        )
+        message.setWordWrap(True)
+        message.setStyleSheet("QLabel { color:#111111; font-size:13px; }")
+        root.addWidget(message)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        self.btn_yes = QPushButton("Yes")
+        self.btn_no = QPushButton("No")
+        for btn in (self.btn_yes, self.btn_no):
+            btn.setFixedWidth(84)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#f1f3f6; color:#111111; border:1px solid #b7bdc9; border-radius:3px; padding:4px 10px; }"
+                "QPushButton:hover { background-color:#e4e8ef; }"
+            )
+        self.btn_yes.clicked.connect(self.accept)
+        self.btn_no.clicked.connect(self.reject)
+        row.addWidget(self.btn_yes)
+        row.addWidget(self.btn_no)
+        root.addLayout(row)
+
+        self.setStyleSheet("QDialog { background:#ffffff; }")
+
+
+class BrowseAndExtractDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Browse and Extract Tool")
+        self.setModal(True)
+        self.resize(1180, 720)
+        self._active_link_mode = "video"
+        self._links_hidden = False
+        self._video_links = []
+        self._channel_links = []
+        self._webengine_view_class = None
+        self._browser_view = None
+        self._extract_scan_timer = QTimer(self)
+        self._extract_scan_timer.setInterval(1800)
+        self._extract_scan_timer.timeout.connect(self._schedule_dom_extract)
+        self._autoscroll_timer = QTimer(self)
+        self._autoscroll_timer.setInterval(1200)
+        self._autoscroll_timer.timeout.connect(self._autoscroll_step)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._build_left_sources_panel())
+        splitter.addWidget(self._build_center_browser_panel())
+        splitter.addWidget(self._build_right_links_panel())
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([180, 760, 220])
+        root.addWidget(splitter, stretch=1)
+
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
+
+        self.btn_controls = QPushButton("Controls")
+        self.btn_controls.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_controls.setStyleSheet(
+            "QPushButton { background-color:#d94a22; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
+            "QPushButton:hover { background-color:#f05a31; }"
+        )
+        bottom.addWidget(self.btn_controls)
+        bottom.addStretch()
+
+        self.btn_autoscroll = QPushButton("Start Autoscroll")
+        self.btn_autoscroll.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_autoscroll.setStyleSheet(
+            "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 16px; font-weight:700; }"
+            "QPushButton:hover { background-color:#ff1a25; }"
+        )
+        self.btn_autoscroll.clicked.connect(self._toggle_autoscroll)
+        bottom.addWidget(self.btn_autoscroll)
+        bottom.addStretch()
+
+        self.btn_add_links = QPushButton("Add Links")
+        self.btn_hide_links = QPushButton("Hide Links")
+        self.btn_close = QPushButton("Close")
+        for btn in (self.btn_add_links, self.btn_hide_links, self.btn_close):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
+                "QPushButton:hover { background-color:#ff1a25; }"
+            )
+        self.btn_add_links.clicked.connect(self._open_add_links_menu)
+        self.btn_hide_links.clicked.connect(self._toggle_links_panel)
+        self.btn_close.clicked.connect(self.accept)
+        bottom.addWidget(self.btn_add_links)
+        bottom.addWidget(self.btn_hide_links)
+        bottom.addWidget(self.btn_close)
+        root.addLayout(bottom)
+
+        self.setStyleSheet(
+            "QDialog { background:#ffffff; }"
+            "QLabel { color:#111111; }"
+            "QTreeWidget, QTextEdit, QLineEdit { background:#ffffff; color:#111111; }"
+        )
+        self._wire_browser_actions()
+        self._refresh_link_panel()
+        QTimer.singleShot(0, self._initialize_live_browser)
+
+    def _build_left_sources_panel(self):
+        panel = QFrame()
+        panel.setMinimumWidth(170)
+        panel.setMaximumWidth(210)
+        panel.setStyleSheet("QFrame { background:#ffffff; border:1px solid #cfcfcf; }")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        self.source_tree = QTreeWidget()
+        self.source_tree.setHeaderHidden(True)
+        self.source_tree.setStyleSheet(
+            "QTreeWidget { background:#ffffff; color:#111111; border:none; }"
+            "QTreeWidget::item:selected { background:#9dc6f3; color:#111111; }"
+        )
+
+        root_yt = QTreeWidgetItem(["YouTube"])
+        QTreeWidgetItem(root_yt, ["Trends"])
+        QTreeWidgetItem(root_yt, ["Login"])
+        root_google = QTreeWidgetItem(["Google"])
+        QTreeWidgetItem(root_google, ["Search"])
+        root_bing = QTreeWidgetItem(["Bing"])
+        QTreeWidgetItem(root_bing, ["Search"])
+        self.source_tree.addTopLevelItem(root_yt)
+        self.source_tree.addTopLevelItem(root_google)
+        self.source_tree.addTopLevelItem(root_bing)
+        self.source_tree.expandAll()
+        self.source_tree.setCurrentItem(root_yt.child(0))
+        self.source_tree.itemClicked.connect(self._on_source_item_clicked)
+        layout.addWidget(self.source_tree, stretch=1)
+        return panel
+
+    def _wire_browser_actions(self):
+        self.input_browser_url.returnPressed.connect(self._navigate_to_input_url)
+        self.btn_go.clicked.connect(self._navigate_to_input_url)
+        self.btn_paste_go.clicked.connect(self._paste_and_go)
+        self.btn_back.clicked.connect(self._go_back)
+        self.btn_next.clicked.connect(self._go_forward)
+        self.btn_stop.clicked.connect(self._stop_loading)
+        self.btn_refresh.clicked.connect(self._refresh_browser)
+        self.btn_bookmark.clicked.connect(self._bookmark_current_url)
+        self.btn_user_pass.clicked.connect(
+            lambda: QMessageBox.information(
+                self,
+                "User/Pass",
+                "This browser login helper will be connected in the next backend step.",
+            )
+        )
+        self.btn_extract_video_links.clicked.connect(self._extract_video_links_now)
+        self.btn_extract_channel_links.clicked.connect(self._extract_channel_links_now)
+
+    def _build_center_browser_panel(self):
+        panel = QFrame()
+        panel.setStyleSheet("QFrame { background:#ffffff; border:1px solid #cfcfcf; }")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(6)
+        self.btn_bookmark = QPushButton("+ Bookmark")
+        self.btn_bookmark.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_bookmark.setStyleSheet(
+            "QPushButton { background-color:#e24a22; color:#ffffff; border:none; border-radius:4px; padding:6px 10px; font-weight:700; }"
+            "QPushButton:hover { background-color:#f05a31; }"
+        )
+        nav_row.addWidget(self.btn_bookmark)
+
+        self.input_browser_url = QLineEdit("https://www.youtube.com/feed/trending")
+        self.input_browser_url.setStyleSheet(
+            "QLineEdit { background:#ffffff; color:#111111; border:1px solid #cfcfcf; border-radius:12px; padding:6px 12px; }"
+        )
+        nav_row.addWidget(self.input_browser_url, stretch=1)
+
+        self.btn_paste_go = QPushButton("Paste & Go")
+        self.btn_go = QPushButton("Go")
+        self.btn_back = QPushButton("Back")
+        self.btn_next = QPushButton("Next")
+        self.btn_stop = QPushButton("Stop")
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_user_pass = QPushButton("User/Pass")
+        for btn in (
+            self.btn_paste_go,
+            self.btn_go,
+            self.btn_back,
+            self.btn_next,
+            self.btn_stop,
+            self.btn_refresh,
+            self.btn_user_pass,
+        ):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#e24a22; color:#ffffff; border:none; border-radius:4px; padding:6px 10px; font-weight:700; }"
+                "QPushButton:hover { background-color:#f05a31; }"
+            )
+            nav_row.addWidget(btn)
+        layout.addLayout(nav_row)
+
+        browser_mock = QFrame()
+        browser_mock.setStyleSheet("QFrame { background:#ffffff; border:1px solid #d7d7d7; }")
+        browser_layout = QVBoxLayout(browser_mock)
+        browser_layout.setContentsMargins(18, 12, 18, 12)
+        browser_layout.setSpacing(12)
+
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(10)
+        youtube_mark = QLabel("YouTube")
+        youtube_mark.setStyleSheet("QLabel { color:#111111; font-size:26px; font-weight:700; }")
+        top_bar.addWidget(youtube_mark)
+        self.input_mock_search = QLineEdit("knife making")
+        self.input_mock_search.setStyleSheet(
+            "QLineEdit { background:#ffffff; color:#111111; border:1px solid #d0d0d0; border-radius:3px; padding:6px 8px; }"
+        )
+        top_bar.addSpacing(20)
+        top_bar.addWidget(self.input_mock_search, stretch=1)
+        browser_layout.addLayout(top_bar)
+
+        self.lbl_browser_heading = QLabel("Trending")
+        self.lbl_browser_heading.setStyleSheet("QLabel { color:#111111; font-size:18px; font-weight:700; }")
+        browser_layout.addWidget(self.lbl_browser_heading)
+
+        self.browser_content = QTextEdit()
+        self.browser_content.setReadOnly(True)
+        self.browser_content.setStyleSheet(
+            "QTextEdit { background:#ffffff; color:#222222; border:1px solid #ececec; padding:10px; }"
+        )
+        self.browser_content.setPlainText(
+            "Making a Super Sharp and Hard Knife Blade by our Village Blacksmith\n"
+            "6.2K views · 2 weeks ago\n\n"
+            "Making a Folding Knife\n"
+            "353 views · 6 days ago\n\n"
+            "Making a carpentry / bushcraft knife\n"
+            "5.3K views · 1 week ago\n\n"
+            "This area is UI-only for now. In backend step, this will become the live browser/extract area."
+        )
+        browser_layout.addWidget(self.browser_content, stretch=1)
+        self.browser_stack = QStackedWidget()
+        self.browser_stack.addWidget(browser_mock)
+        layout.addWidget(self.browser_stack, stretch=1)
+        return panel
+
+    def _build_right_links_panel(self):
+        panel = QFrame()
+        panel.setMinimumWidth(210)
+        panel.setMaximumWidth(250)
+        panel.setStyleSheet("QFrame { background:#ffffff; border:1px solid #cfcfcf; }")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.btn_extract_video_links = QPushButton("Extract Video Links")
+        self.btn_extract_channel_links = QPushButton("Extract Channel Links")
+        self.btn_clear_all_links = QPushButton("Clear all links")
+        for btn in (self.btn_extract_video_links, self.btn_extract_channel_links, self.btn_clear_all_links):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#e24a22; color:#ffffff; border:none; border-radius:4px; padding:8px 10px; font-weight:700; }"
+                "QPushButton:hover { background-color:#f05a31; }"
+            )
+        self.btn_extract_video_links.clicked.connect(lambda: self._set_link_mode("video"))
+        self.btn_extract_channel_links.clicked.connect(lambda: self._set_link_mode("channel"))
+        self.btn_clear_all_links.clicked.connect(self._clear_mock_links)
+        layout.addWidget(self.btn_extract_video_links)
+        layout.addWidget(self.btn_extract_channel_links)
+        layout.addWidget(self.btn_clear_all_links)
+
+        self.lbl_total_videos = QLabel("Total Videos: 0")
+        self.lbl_total_channels = QLabel("Total Channels: 0")
+        self.lbl_total_videos.setStyleSheet("QLabel { color:#111111; font-size:12px; font-weight:700; }")
+        self.lbl_total_channels.setStyleSheet("QLabel { color:#111111; font-size:12px; font-weight:700; }")
+        layout.addWidget(self.lbl_total_videos)
+        layout.addWidget(self.lbl_total_channels)
+
+        self.text_extracted_links = QTextEdit()
+        self.text_extracted_links.setReadOnly(True)
+        self.text_extracted_links.setStyleSheet(
+            "QTextEdit { background:#ffffff; color:#111111; border:1px solid #cfcfcf; padding:6px; }"
+        )
+        layout.addWidget(self.text_extracted_links, stretch=1)
+
+        self.links_panel = panel
+        return panel
+
+    def _normalize_browser_url(self, raw_url):
+        text = str(raw_url or "").strip()
+        if not text:
+            return ""
+        if "://" not in text:
+            if text.startswith("/"):
+                text = urljoin("https://www.youtube.com", text)
+            elif text.startswith("www."):
+                text = f"https://{text}"
+            else:
+                text = f"https://{text}"
+        return text
+
+    def _initialize_live_browser(self):
+        self._navigate_to_input_url()
+
+    def _ensure_browser_view(self):
+        if self._browser_view is not None:
+            return True
+        if self._webengine_view_class is None:
+            try:
+                from PyQt6.QtWebEngineWidgets import QWebEngineView as ImportedWebEngineView
+                self._webengine_view_class = ImportedWebEngineView
+            except Exception as exc:
+                self.browser_content.append(f"\n\nLive browser unavailable:\n{exc}")
+                return False
+        try:
+            self._browser_view = self._webengine_view_class()
+            self._browser_view.urlChanged.connect(self._on_browser_url_changed)
+            self._browser_view.loadFinished.connect(self._on_browser_load_finished)
+            self.browser_stack.addWidget(self._browser_view)
+            self.browser_stack.setCurrentWidget(self._browser_view)
+            self._extract_scan_timer.start()
+            return True
+        except Exception as exc:
+            self._browser_view = None
+            self.browser_content.append(f"\n\nFailed to create embedded browser:\n{exc}")
+            return False
+
+    def _navigate_to_input_url(self):
+        target_url = self._normalize_browser_url(self.input_browser_url.text())
+        if not target_url:
+            return
+        self.input_browser_url.setText(target_url)
+        if self._ensure_browser_view():
+            self._browser_view.setUrl(QUrl(target_url))
+        else:
+            self.lbl_browser_heading.setText(target_url)
+
+    def _paste_and_go(self):
+        pasted = QApplication.clipboard().text().strip()
+        if pasted:
+            self.input_browser_url.setText(pasted)
+        self._navigate_to_input_url()
+
+    def _go_back(self):
+        if self._browser_view is not None:
+            self._browser_view.back()
+
+    def _go_forward(self):
+        if self._browser_view is not None:
+            self._browser_view.forward()
+
+    def _stop_loading(self):
+        if self._browser_view is not None:
+            self._browser_view.stop()
+
+    def _refresh_browser(self):
+        if self._browser_view is not None:
+            self._browser_view.reload()
+        else:
+            self._navigate_to_input_url()
+
+    def _bookmark_current_url(self):
+        current_url = self.input_browser_url.text().strip()
+        if not current_url:
+            return
+        current_item = self.source_tree.currentItem()
+        parent_item = current_item.parent() if current_item and current_item.parent() is not None else current_item
+        if parent_item is None:
+            parent_item = self.source_tree.topLevelItem(0)
+        bookmark_item = QTreeWidgetItem([current_url])
+        parent_item.addChild(bookmark_item)
+        parent_item.setExpanded(True)
+
+    def _on_browser_url_changed(self, qurl):
+        url_text = qurl.toString().strip()
+        if not url_text:
+            return
+        self.input_browser_url.setText(url_text)
+        host_text = urlparse(url_text).netloc or url_text
+        self.lbl_browser_heading.setText(host_text)
+
+    def _on_browser_load_finished(self, ok):
+        if ok and self._browser_view is not None:
+            self._schedule_dom_extract()
+            self._browser_view.page().toHtml(self._on_browser_html_ready)
+
+    @staticmethod
+    def _normalize_video_link(raw_link, base_url="https://www.youtube.com"):
+        text = unescape(str(raw_link or "").strip().strip('"').strip("'"))
+        if not text:
+            return ""
+        if text.startswith("//"):
+            text = "https:" + text
+        elif text.startswith("/"):
+            text = urljoin(base_url, text)
+        parsed = urlparse(text)
+        if not parsed.scheme:
+            text = urljoin(base_url, text)
+            parsed = urlparse(text)
+        host = parsed.netloc.lower()
+        path = parsed.path or ""
+        if "youtu.be" in host:
+            short_id = path.strip("/").split("/", 1)[0]
+            return f"https://www.youtube.com/watch?v={short_id}" if short_id else ""
+        if "youtube.com" not in host and "youtube-nocookie.com" not in host:
+            return ""
+        query = parse_qs(parsed.query)
+        if "/watch" in path and query.get("v"):
+            return f"https://www.youtube.com/watch?v={query['v'][0]}"
+        if path.startswith("/shorts/"):
+            short_id = path.split("/shorts/", 1)[1].split("/", 1)[0]
+            return f"https://www.youtube.com/shorts/{short_id}" if short_id else ""
+        return ""
+
+    @staticmethod
+    def _normalize_channel_link(raw_link, base_url="https://www.youtube.com"):
+        text = unescape(str(raw_link or "").strip().strip('"').strip("'"))
+        if not text:
+            return ""
+        if text.startswith("//"):
+            text = "https:" + text
+        elif text.startswith("/"):
+            text = urljoin(base_url, text)
+        parsed = urlparse(text)
+        if not parsed.scheme:
+            text = urljoin(base_url, text)
+            parsed = urlparse(text)
+        host = parsed.netloc.lower()
+        path = parsed.path or ""
+        if "youtube.com" not in host and "youtube-nocookie.com" not in host:
+            return ""
+        if path.startswith("/channel/") or path.startswith("/@") or path.startswith("/c/") or path.startswith("/user/"):
+            return f"https://www.youtube.com{path.rstrip('/')}" if path.strip("/") else ""
+        return ""
+
+    def _extract_links_from_html(self, html_text):
+        html = str(html_text or "")
+        base_url = self.input_browser_url.text().strip() or "https://www.youtube.com"
+        found_urls = set(re.findall(r'https?://[^\s"\'<>]+', html, flags=re.IGNORECASE))
+        found_urls.update(re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.IGNORECASE))
+
+        existing_videos = {link.lower() for link in self._video_links}
+        existing_channels = {link.lower() for link in self._channel_links}
+        new_videos = []
+        new_channels = []
+
+        for raw_url in found_urls:
+            video_link = self._normalize_video_link(raw_url, base_url=base_url)
+            if video_link and video_link.lower() not in existing_videos:
+                existing_videos.add(video_link.lower())
+                new_videos.append(video_link)
+            channel_link = self._normalize_channel_link(raw_url, base_url=base_url)
+            if channel_link and channel_link.lower() not in existing_channels:
+                existing_channels.add(channel_link.lower())
+                new_channels.append(channel_link)
+
+        if new_videos:
+            self._video_links.extend(new_videos)
+        if new_channels:
+            self._channel_links.extend(new_channels)
+        self._refresh_link_panel()
+
+    def _on_browser_html_ready(self, html_text):
+        self._extract_links_from_html(html_text)
+
+    def _extract_video_links_now(self):
+        self._active_link_mode = "video"
+        self._schedule_dom_extract()
+        self._refresh_link_panel()
+
+    def _extract_channel_links_now(self):
+        self._active_link_mode = "channel"
+        self._schedule_dom_extract()
+        self._refresh_link_panel()
+
+    def _schedule_dom_extract(self):
+        if self._browser_view is None:
+            return
+        js_code = """
+            (() => {
+                const hrefs = Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href || a.getAttribute('href') || '')
+                    .filter(Boolean);
+                return { hrefs, url: window.location.href || '' };
+            })();
+        """
+        self._browser_view.page().runJavaScript(js_code, self._on_dom_links_ready)
+
+    def _on_dom_links_ready(self, payload):
+        if not isinstance(payload, dict):
+            return
+        hrefs = payload.get("hrefs", [])
+        current_url = str(payload.get("url", "")).strip()
+        if current_url:
+            self.input_browser_url.setText(current_url)
+        if hrefs:
+            self._extract_links_from_html("\n".join(str(href) for href in hrefs))
+
+    def _toggle_autoscroll(self):
+        if self._autoscroll_timer.isActive():
+            self._autoscroll_timer.stop()
+            self.btn_autoscroll.setText("Start Autoscroll")
+            return
+        self._autoscroll_timer.start()
+        self.btn_autoscroll.setText("Stop Autoscroll")
+
+    def _autoscroll_step(self):
+        if self._browser_view is None:
+            self._autoscroll_timer.stop()
+            self.btn_autoscroll.setText("Start Autoscroll")
+            return
+        js_code = """
+            (() => {
+                const step = Math.max(400, Math.floor(window.innerHeight * 0.85));
+                window.scrollBy(0, step);
+                return { hrefs: Array.from(document.querySelectorAll('a[href]')).map(a => a.href || a.getAttribute('href') || '').filter(Boolean), url: window.location.href || '' };
+            })();
+        """
+        self._browser_view.page().runJavaScript(js_code, self._on_dom_links_ready)
+
+    def _on_source_item_clicked(self, item, _column):
+        text = item.text(0).strip()
+        if text == "Trends":
+            self.input_browser_url.setText("https://www.youtube.com/feed/trending")
+            self.lbl_browser_heading.setText("Trending")
+            self._navigate_to_input_url()
+        elif text == "Login":
+            self.input_browser_url.setText("https://accounts.google.com/")
+            self.lbl_browser_heading.setText("Login")
+            self._navigate_to_input_url()
+        elif text == "Search":
+            self.input_browser_url.setText("https://www.youtube.com/results?search_query=knife+making")
+            self.lbl_browser_heading.setText("Search Results")
+            self._navigate_to_input_url()
+        else:
+            self.lbl_browser_heading.setText(text or "Browser")
+
+    def _set_link_mode(self, mode):
+        self._active_link_mode = "channel" if mode == "channel" else "video"
+        self._refresh_link_panel()
+
+    def _refresh_link_panel(self):
+        video_count = len(self._video_links)
+        channel_count = len(self._channel_links)
+        self.lbl_total_videos.setText(f"Total Videos: {video_count}")
+        self.lbl_total_channels.setText(f"Total Channels: {channel_count}")
+        if self._active_link_mode == "channel":
+            self.text_extracted_links.setPlainText("\n".join(self._channel_links))
+        else:
+            self.text_extracted_links.setPlainText("\n".join(self._video_links))
+
+    def _clear_mock_links(self):
+        self._video_links = []
+        self._channel_links = []
+        self._refresh_link_panel()
+
+    def _toggle_links_panel(self):
+        self._links_hidden = not self._links_hidden
+        self.links_panel.setVisible(not self._links_hidden)
+        self.btn_hide_links.setText("Show Links" if self._links_hidden else "Hide Links")
+
+    def _open_add_links_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background:#ffffff; color:#111111; border:1px solid #cfcfcf; }"
+            "QMenu::item { padding:6px 16px; }"
+            "QMenu::item:selected { background:#f3d0d3; color:#111111; }"
+        )
+        act_add_videos = menu.addAction("Add links to Videos Tool")
+        act_add_channels = menu.addAction("Add links to Channels Tool")
+        chosen = menu.exec(self.btn_add_links.mapToGlobal(self.btn_add_links.rect().bottomLeft()))
+        if chosen == act_add_videos:
+            self._confirm_add_links("Videos Tool")
+        elif chosen == act_add_channels:
+            self._confirm_add_links("Channels Tool")
+
+    def _add_links_to_target(self, target_name):
+        owner = self.parent()
+        if owner is None:
+            return 0
+
+        if target_name == "Channels Tool":
+            links = list(self._channel_links)
+            if not links:
+                return 0
+            main_window = getattr(owner, "main_window", None)
+            if main_window is not None and hasattr(main_window, "tab_channels"):
+                target_tab = main_window.tab_channels
+                if hasattr(target_tab, "receive_links_for_import"):
+                    target_tab.receive_links_for_import(links)
+                elif hasattr(target_tab, "receive_payload"):
+                    target_tab.receive_payload(
+                        "\n".join(links),
+                        f"Received {len(links)} channel link(s) from Browse and Extract Tool.",
+                    )
+                if hasattr(main_window, "switch_tab"):
+                    main_window.switch_tab(4)
+            return len(links)
+
+        links = list(self._video_links)
+        if not links:
+            return 0
+
+        if hasattr(owner, "switch_mode"):
+            owner.switch_mode("browse")
+        if hasattr(owner, "input_video_links"):
+            existing = [line.strip() for line in owner.input_video_links.toPlainText().splitlines() if line.strip()]
+            seen = {line.lower() for line in existing}
+            merged = list(existing)
+            for link in links:
+                if link.lower() in seen:
+                    continue
+                seen.add(link.lower())
+                merged.append(link)
+            owner.input_video_links.setPlainText("\n".join(merged))
+        if hasattr(owner, "_set_status"):
+            owner._set_status(f"Added {len(links)} extracted video link(s) to Browse or Import.")
+        return len(links)
+
+    def _confirm_add_links(self, target_name):
+        link_count = self._add_links_to_target(target_name)
+        if link_count <= 0:
+            QMessageBox.warning(self, "Browse and Extract Tool", f"No links available for {target_name}.")
+            return
+        dlg = ConfirmAddLinksDialog(self, link_count=link_count)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.accept()
+
+    def closeEvent(self, event):
+        self._extract_scan_timer.stop()
+        self._autoscroll_timer.stop()
+        super().closeEvent(event)
 
 
 class VideoDetailsDialog(QDialog):
@@ -495,11 +2202,12 @@ class VideosTab(QWidget):
         self._trending_worker = None
         self._import_worker = None
         self._download_worker = None
+        self._metadata_worker = None
         self._invalid_import_count = 0
         self._invalid_import_rows = []
         self._all_rows_cache = []
-        self._active_filter = {"source": "All Sources", "phrase": "", "title": "", "description": ""}
-        self._default_column_widths = {0: 26, 1: 94, 2: 100, 3: 210, 4: 76, 5: 120, 6: 250, 7: 320}
+        self._active_filter = self._default_filter_state()
+        self._default_column_widths = dict(VIDEO_DEFAULT_COLUMN_WIDTHS)
         self._table_search_dialog = None
         self._search_hits = []
         self._search_hit_index = -1
@@ -510,6 +2218,7 @@ class VideosTab(QWidget):
         self._thumbnail_fallback_workers = {}
         self._thumbnail_manager = QNetworkAccessManager(self)
         self._thumbnail_manager.finished.connect(self._on_thumbnail_finished)
+        self._title_analysis_stop_words = list(DEFAULT_STOP_WORDS)
         self._dark_label_style = "QLabel { color: #f3f4f6; }"
         self._light_input_style = (
             "QLineEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:5px 8px; }"
@@ -526,6 +2235,73 @@ class VideosTab(QWidget):
             "QPushButton:hover { background-color:#ff1a25; }"
         )
         self.setup_ui()
+
+    @staticmethod
+    def _empty_video_row_dict():
+        return {
+            "Video ID": "",
+            "Video Link": "",
+            "Source": "YouTube",
+            "Search Phrase": "",
+            "Title": "",
+            "Description": "",
+            "Thumbnail URL": "",
+            "Rating": "not-given",
+            "Comments": "not-given",
+            "View Count": "not-given",
+            "Length Seconds": "not-given",
+            "Published": "not-given",
+            "Published Age (Days)": "not-given",
+            "Avg. Views per Day": "not-given",
+            "Category": "not-given",
+            "Subtitles": "not-given",
+            "Channel": "",
+            "Channel Link": "",
+            "Subscribers": "not-given",
+            "Tags": "",
+        }
+
+    @staticmethod
+    def _default_filter_state():
+        return {
+            "source": "All Sources",
+            "phrase": "",
+            "title": "",
+            "description": "",
+            "numeric": {},
+        }
+
+    def _normalize_video_row(self, video):
+        row_dict = self._empty_video_row_dict()
+        for key in row_dict.keys():
+            if key in video:
+                row_dict[key] = str(video.get(key, "")).strip()
+        row_dict["Source"] = row_dict["Source"] or "YouTube"
+        row_dict["Video ID"] = row_dict["Video ID"].strip()
+        row_dict["Video Link"] = row_dict["Video Link"].strip()
+        if row_dict["Video Link"].startswith("www.youtube.com/"):
+            row_dict["Video Link"] = f"https://{row_dict['Video Link']}"
+        if row_dict["Video ID"] and "youtube.com/watch?v=" not in row_dict["Video Link"]:
+            row_dict["Video Link"] = f"https://www.youtube.com/watch?v={row_dict['Video ID']}"
+        row_dict["Thumbnail URL"] = str(video.get("Thumbnail URL", row_dict["Thumbnail URL"])).strip()
+        return row_dict
+
+    def _set_table_text_item(self, row, column_name, text):
+        col = VIDEO_COLUMN_INDEX[column_name]
+        item = QTableWidgetItem(str(text))
+        if column_name in {"Video ID", "Source", "Rating", "Comments", "View Count", "Length Seconds", "Published Age (Days)", "Avg. Views per Day", "Subtitles", "Subscribers"}:
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+        if column_name in {"Video Link", "Channel Link"}:
+            link_text = str(text).strip()
+            if link_text.startswith("http://") or link_text.startswith("https://"):
+                item.setForeground(QColor("#1a73e8"))
+                item.setToolTip(link_text)
+        elif column_name in {"Title", "Description", "Tags", "Channel"}:
+            item.setToolTip(str(text))
+        self.videos_table.setItem(row, col, item)
 
     def setup_ui(self):
         root = QVBoxLayout(self)
@@ -548,6 +2324,7 @@ class VideosTab(QWidget):
         body.addWidget(right_panel, stretch=1)
 
         self.switch_mode("search")
+        self._refresh_header_filter_tooltips()
         self._update_status_labels()
 
     def _build_mode_bar(self, parent_layout):
@@ -745,6 +2522,8 @@ class VideosTab(QWidget):
         for btn in (self.btn_browser_links, self.btn_content_links):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(self._red_button_style)
+        self.btn_browser_links.clicked.connect(self._open_browse_extract_dialog)
+        self.btn_content_links.clicked.connect(lambda: self._show_coming_soon("Browse or Import -> Content extract"))
         row_type.addWidget(self.btn_browser_links)
         row_type.addWidget(self.btn_content_links)
         v.addLayout(row_type)
@@ -776,15 +2555,17 @@ class VideosTab(QWidget):
         v.setSpacing(6)
 
         self.videos_table = QTableWidget()
-        self.videos_table.setColumnCount(8)
-        self.videos_table.setHorizontalHeaderLabels(
-            ["", "Image", "Video ID", "Video Link", "Source", "Search Phrase", "Title", "Description"]
-        )
+        self.videos_table.setColumnCount(len(VIDEO_TABLE_COLUMNS))
+        self.videos_table.setHorizontalHeaderLabels(VIDEO_TABLE_COLUMNS)
         self.videos_table.setAlternatingRowColors(False)
         self.videos_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.videos_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.videos_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.videos_table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.videos_table.setWordWrap(False)
+        self.videos_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.videos_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.videos_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.videos_table.setFont(QFont("Segoe UI", 11))
         self.videos_table.verticalHeader().setVisible(False)
         self.videos_table.verticalHeader().setDefaultSectionSize(30)
@@ -795,18 +2576,16 @@ class VideosTab(QWidget):
         self.videos_table.setStyleSheet(
             "QTableWidget { background-color:#ffffff; color:#111111; gridline-color:#dddddd; border:1px solid #cfcfcf; }"
             "QHeaderView::section { background-color:#f0f0f0; color:#111111; border:1px solid #d0d0d0; font-weight:700; padding:4px; }"
+            + TABLE_SCROLLBAR_STYLE
         )
 
         header = self.videos_table.horizontalHeader()
         header.setStretchLastSection(False)
+        header.sectionClicked.connect(self._on_header_section_clicked)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
+        for col in range(2, len(VIDEO_TABLE_COLUMNS)):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
 
         for col, width in self._default_column_widths.items():
             self.videos_table.setColumnWidth(col, width)
@@ -862,7 +2641,19 @@ class VideosTab(QWidget):
         bottom.addWidget(self.btn_clear)
         v.addLayout(bottom)
         self._on_image_size_changed(self.slider_image_size.value())
+        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
         return panel
+
+    def _tune_horizontal_scrollbar(self):
+        if not hasattr(self, "videos_table"):
+            return
+        scrollbar = self.videos_table.horizontalScrollBar()
+        if scrollbar is None:
+            return
+        viewport_width = max(240, self.videos_table.viewport().width())
+        page_step = max(120, int(viewport_width * 0.24))
+        scrollbar.setPageStep(page_step)
+        scrollbar.setSingleStep(max(24, page_step // 4))
 
     def switch_mode(self, mode):
         self._mode = mode
@@ -921,8 +2712,10 @@ class VideosTab(QWidget):
         self._thumbnail_fallback_workers.clear()
 
     def _clear_all_video_data(self):
+        if self._metadata_worker is not None and self._metadata_worker.isRunning():
+            self._metadata_worker.stop()
         self._all_rows_cache = []
-        self._active_filter = {"source": "All Sources", "phrase": "", "title": "", "description": ""}
+        self._active_filter = self._default_filter_state()
         self._clear_table_ui_only()
 
     def _set_status(self, message):
@@ -947,6 +2740,79 @@ class VideosTab(QWidget):
         self.btn_get_data.setEnabled(not running)
         self.btn_stop_search.setEnabled(running or (self._search_worker is not None and self._search_worker.isRunning()))
         self.btn_stop_import.setEnabled(running or (self._import_worker is not None and self._import_worker.isRunning()))
+
+    def _start_metadata_enrichment(self):
+        if self._metadata_worker is not None and self._metadata_worker.isRunning():
+            self._metadata_worker.stop()
+            self._metadata_worker.wait(1000)
+
+        if not self._all_rows_cache:
+            return
+
+        proxy_payload = self._current_proxy_payload()
+        proxy_url = proxy_payload["proxies"][0] if proxy_payload.get("enabled") and proxy_payload.get("proxies") else ""
+        self._metadata_worker = VideoMetadataEnrichWorker(self._all_rows_cache, proxy_url=proxy_url)
+        self._metadata_worker.row_enriched_signal.connect(self._apply_enriched_video_row)
+        self._metadata_worker.status_signal.connect(self._set_status)
+        self._metadata_worker.error_signal.connect(lambda _msg: None)
+        self._metadata_worker.finished_signal.connect(self._on_metadata_enrich_finished)
+        self._metadata_worker.start()
+
+    def _find_cache_index_by_video_id(self, video_id):
+        key = str(video_id or "").strip()
+        if not key:
+            return -1
+        for idx, row in enumerate(self._all_rows_cache):
+            if str(row.get("Video ID", "")).strip() == key:
+                return idx
+        return -1
+
+    def _find_table_row_by_video_id(self, video_id):
+        key = str(video_id or "").strip()
+        if not key:
+            return -1
+        col = VIDEO_COLUMN_INDEX["Video ID"]
+        for row in range(self.videos_table.rowCount()):
+            item = self.videos_table.item(row, col)
+            if item is not None and item.text().strip() == key:
+                return row
+        return -1
+
+    def _apply_enriched_video_row(self, video_id, details):
+        idx = self._find_cache_index_by_video_id(video_id)
+        if idx < 0:
+            return
+        merged = dict(self._all_rows_cache[idx])
+        for key, value in dict(details or {}).items():
+            text = str(value or "").strip()
+            if text:
+                merged[key] = text
+        self._all_rows_cache[idx] = merged
+
+        row = self._find_table_row_by_video_id(video_id)
+        if row < 0:
+            return
+        thumb_url = str(merged.get("Thumbnail URL", "")).strip()
+        if thumb_url:
+            thumb_item = self.videos_table.item(row, VIDEO_COLUMN_INDEX["Image"])
+            if thumb_item is not None:
+                thumb_item.setToolTip(thumb_url)
+            if thumb_url in self._thumbnail_cache:
+                self._apply_thumbnail_to_row(row, thumb_url)
+            else:
+                self._queue_thumbnail_load(row, thumb_url)
+
+        for column_name in VIDEO_TEXT_COLUMNS:
+            self._set_table_text_item(row, column_name, merged.get(column_name, ""))
+
+    def _on_metadata_enrich_finished(self, result):
+        updated = int((result or {}).get("updated", 0))
+        stopped = bool((result or {}).get("stopped", False))
+        if stopped:
+            self._set_status(f"Metadata enrich stopped. Updated {updated} row(s).")
+        elif updated > 0:
+            self._set_status(f"Metadata enrich finished. Updated {updated} row(s).")
+        self._metadata_worker = None
 
     def _current_proxy_payload(self):
         if self.main_window is None or not hasattr(self.main_window, "get_proxy_settings"):
@@ -1025,6 +2891,8 @@ class VideosTab(QWidget):
         if self._download_worker is not None and self._download_worker.isRunning():
             self._download_worker.stop()
             self._set_status("Stopping video download...")
+        if self._metadata_worker is not None and self._metadata_worker.isRunning():
+            self._metadata_worker.stop()
 
     def start_trending_videos(self):
         if self._download_worker is not None and self._download_worker.isRunning():
@@ -1068,6 +2936,8 @@ class VideosTab(QWidget):
         if self._download_worker is not None and self._download_worker.isRunning():
             self._download_worker.stop()
             self._set_status("Stopping video download...")
+        if self._metadata_worker is not None and self._metadata_worker.isRunning():
+            self._metadata_worker.stop()
 
     @staticmethod
     def _extract_video_id_from_url(url_text):
@@ -1120,6 +2990,7 @@ class VideosTab(QWidget):
             canonical = f"https://www.youtube.com/watch?v={video_id}"
             rows.append(
                 {
+                    **self._empty_video_row_dict(),
                     "Video ID": video_id,
                     "Video Link": canonical,
                     "Source": "Imported",
@@ -1211,6 +3082,8 @@ class VideosTab(QWidget):
         self._invalid_import_rows = []
         self._invalid_import_count = 0
         self._import_worker = None
+        if count > 0:
+            self._start_metadata_enrichment()
 
     def _on_search_finished(self, result):
         self._set_search_running(False)
@@ -1220,6 +3093,8 @@ class VideosTab(QWidget):
         else:
             self._set_status("Search finished.")
         self._search_worker = None
+        if count > 0:
+            self._start_metadata_enrichment()
 
     def _on_trending_finished(self, result):
         self._set_search_running(False)
@@ -1229,19 +3104,13 @@ class VideosTab(QWidget):
         else:
             self._set_status("Trending load finished.")
         self._trending_worker = None
+        if count > 0:
+            self._start_metadata_enrichment()
 
     def _append_video_row(self, video):
         if video is None:
             return
-        row_dict = {
-            "Video ID": str(video.get("Video ID", "")).strip(),
-            "Video Link": str(video.get("Video Link", "")).strip(),
-            "Source": str(video.get("Source", "YouTube")).strip(),
-            "Search Phrase": str(video.get("Search Phrase", "")).strip(),
-            "Title": str(video.get("Title", "")).strip(),
-            "Description": str(video.get("Description", "")).strip(),
-            "Thumbnail URL": str(video.get("Thumbnail URL", "")).strip(),
-        }
+        row_dict = self._normalize_video_row(video)
         self._all_rows_cache.append(dict(row_dict))
         if not self._row_matches_filter(row_dict, self._active_filter):
             return
@@ -1269,46 +3138,15 @@ class VideosTab(QWidget):
         if thumb_url:
             self._queue_thumbnail_load(row, thumb_url)
 
-        values = [
-            row_dict.get("Video ID", ""),
-            row_dict.get("Video Link", ""),
-            row_dict.get("Source", "YouTube"),
-            row_dict.get("Search Phrase", ""),
-            row_dict.get("Title", ""),
-            row_dict.get("Description", ""),
-        ]
+        for column_name in VIDEO_TEXT_COLUMNS:
+            self._set_table_text_item(row, column_name, row_dict.get(column_name, ""))
 
-        for col_offset, text in enumerate(values, start=2):
-            item = QTableWidgetItem(str(text))
-            if col_offset in (2, 4):
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            else:
-                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-
-            if col_offset == 3:
-                # Keep valid full URL and show as link-like text in the table.
-                link_text = str(text).strip()
-                if link_text.startswith("www.youtube.com/"):
-                    link_text = f"https://{link_text}"
-                if link_text and "youtube.com/watch?v=" not in link_text:
-                    video_id = row_dict.get("Video ID", "")
-                    if video_id:
-                        link_text = f"https://www.youtube.com/watch?v={video_id}"
-                        item.setText(link_text)
-                if link_text.startswith("http://") or link_text.startswith("https://"):
-                    item.setForeground(QColor("#1a73e8"))
-                    item.setToolTip(link_text)
-            elif col_offset in (6, 7):
-                item.setToolTip(str(text))
-            self.videos_table.setItem(row, col_offset, item)
-
-        # Keep the Title column wide enough to show full text (with horizontal scrolling if needed).
-        self.videos_table.resizeColumnToContents(6)
         self.videos_table.scrollToBottom()
+        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
         self._update_status_labels()
 
     def _on_table_cell_double_clicked(self, row, column):
-        if column != 3:
+        if column != VIDEO_COLUMN_INDEX["Video Link"]:
             return
         item = self.videos_table.item(row, column)
         if item is None:
@@ -1318,11 +3156,53 @@ class VideosTab(QWidget):
             webbrowser.open_new_tab(link)
 
     @staticmethod
-    def _row_matches_filter(row, flt):
+    def _parse_numeric_value(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if lowered in {"not-given", "n/a", "-", "none"}:
+            return None
+        cleaned = text.replace(",", "").replace("+", "").strip()
+        match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _evaluate_numeric_expression(value, expression):
+        expr = str(expression or "").strip()
+        if not expr:
+            return True
+        match = re.fullmatch(r"(>=|<=|!=|==|=|>|<)\s*(-?\d+(?:\.\d+)?)", expr)
+        if not match:
+            return None
+        operator = match.group(1)
+        target = float(match.group(2))
+        if operator == ">":
+            return value > target
+        if operator == "<":
+            return value < target
+        if operator == ">=":
+            return value >= target
+        if operator == "<=":
+            return value <= target
+        if operator in {"=", "=="}:
+            return value == target
+        if operator == "!=":
+            return value != target
+        return None
+
+    @classmethod
+    def _row_matches_filter(cls, row, flt):
         source = str((flt or {}).get("source", "All Sources")).strip()
         phrase = str((flt or {}).get("phrase", "")).strip().lower()
         title = str((flt or {}).get("title", "")).strip().lower()
         desc = str((flt or {}).get("description", "")).strip().lower()
+        numeric = dict((flt or {}).get("numeric", {}) or {})
 
         if source and source != "All Sources":
             if str(row.get("Source", "")).strip() != source:
@@ -1333,6 +3213,16 @@ class VideosTab(QWidget):
             return False
         if desc and desc not in str(row.get("Description", "")).lower():
             return False
+        for column_name, expression in numeric.items():
+            expr = str(expression or "").strip()
+            if not expr:
+                continue
+            parsed_value = cls._parse_numeric_value(row.get(column_name, ""))
+            if parsed_value is None:
+                return False
+            matched = cls._evaluate_numeric_expression(parsed_value, expr)
+            if matched is not True:
+                return False
         return True
 
     def _sources_from_cache(self):
@@ -1362,33 +3252,8 @@ class VideosTab(QWidget):
         if thumb_url:
             self._queue_thumbnail_load(row, thumb_url)
 
-        values = [
-            row_dict.get("Video ID", ""),
-            row_dict.get("Video Link", ""),
-            row_dict.get("Source", "YouTube"),
-            row_dict.get("Search Phrase", ""),
-            row_dict.get("Title", ""),
-            row_dict.get("Description", ""),
-        ]
-        for col_offset, text in enumerate(values, start=2):
-            item = QTableWidgetItem(str(text))
-            if col_offset in (2, 4):
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            else:
-                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-            if col_offset == 3:
-                link_text = str(text).strip()
-                if link_text and not link_text.startswith("http"):
-                    video_id = str(row_dict.get("Video ID", "")).strip()
-                    if video_id:
-                        link_text = f"https://www.youtube.com/watch?v={video_id}"
-                        item.setText(link_text)
-                if link_text.startswith("http://") or link_text.startswith("https://"):
-                    item.setForeground(QColor("#1a73e8"))
-                    item.setToolTip(link_text)
-            elif col_offset in (6, 7):
-                item.setToolTip(str(text))
-            self.videos_table.setItem(row, col_offset, item)
+        for column_name in VIDEO_TEXT_COLUMNS:
+            self._set_table_text_item(row, column_name, row_dict.get(column_name, ""))
 
     def _rebuild_table_from_cache(self):
         self._reset_table_search_state()
@@ -1398,19 +3263,67 @@ class VideosTab(QWidget):
         for row_dict in self._all_rows_cache:
             if self._row_matches_filter(row_dict, self._active_filter):
                 self._draw_row_without_caching(row_dict)
-        self.videos_table.resizeColumnToContents(6)
         self._update_status_labels()
+        self._refresh_header_filter_tooltips()
+        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
         self._set_status(f"Filter applied: {self.videos_table.rowCount()} / {len(self._all_rows_cache)} rows.")
 
     def open_filters_dialog(self):
         dlg = VideosFilterDialog(self, sources=self._sources_from_cache(), preset=self._active_filter)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._active_filter = dlg.filter_values()
+        next_filter = dlg.filter_values()
+        next_filter["numeric"] = dict(self._active_filter.get("numeric", {}) or {})
+        self._active_filter = next_filter
         self._rebuild_table_from_cache()
 
     def reset_video_filters(self):
-        self._active_filter = {"source": "All Sources", "phrase": "", "title": "", "description": ""}
+        self._active_filter = self._default_filter_state()
+        self._rebuild_table_from_cache()
+
+    def _refresh_header_filter_tooltips(self):
+        for index, column_name in enumerate(VIDEO_TABLE_COLUMNS):
+            item = self.videos_table.horizontalHeaderItem(index)
+            if item is None:
+                continue
+            if column_name in VIDEO_NUMERIC_FILTERABLE_COLUMNS:
+                current_expr = str(self._active_filter.get("numeric", {}).get(column_name, "")).strip()
+                if current_expr:
+                    item.setToolTip(f"Active filter: {current_expr}")
+                else:
+                    item.setToolTip("Click to filter this numeric column. Examples: >500000, >=1000, <60, =0")
+            else:
+                item.setToolTip("")
+
+    def _on_header_section_clicked(self, section):
+        if section < 0 or section >= len(VIDEO_TABLE_COLUMNS):
+            return
+        column_name = VIDEO_TABLE_COLUMNS[section]
+        if column_name not in VIDEO_NUMERIC_FILTERABLE_COLUMNS:
+            return
+
+        current_expr = str(self._active_filter.get("numeric", {}).get(column_name, "")).strip()
+        dlg = VideoNumericFilterDialog(self, column_name=column_name, current_expression=current_expr)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        expression = dlg.selected_expression()
+        next_numeric = dict(self._active_filter.get("numeric", {}) or {})
+        if expression is None or not str(expression).strip():
+            next_numeric.pop(column_name, None)
+        else:
+            probe = self._evaluate_numeric_expression(1.0, expression)
+            if probe is None:
+                QMessageBox.warning(
+                    self,
+                    "Videos Tool",
+                    "Numeric filter format is invalid. Use examples like >500000, >=1000, <60, =0.",
+                )
+                return
+            next_numeric[column_name] = str(expression).strip()
+
+        self._active_filter["numeric"] = next_numeric
+        self._refresh_header_filter_tooltips()
         self._rebuild_table_from_cache()
 
     def auto_fit_column_widths(self):
@@ -1425,6 +3338,7 @@ class VideosTab(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.videos_table.setColumnWidth(0, self._default_column_widths[0])
         self.videos_table.setColumnWidth(1, self._default_column_widths[1])
+        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
         self._set_status("Auto-fit column widths applied.")
 
     def reset_column_widths(self):
@@ -1434,14 +3348,11 @@ class VideosTab(QWidget):
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
+        for col in range(2, self.videos_table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         for col, width in self._default_column_widths.items():
             self.videos_table.setColumnWidth(col, width)
+        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
         self._set_status("Column widths reset.")
 
     def _reset_table_search_state(self):
@@ -1557,7 +3468,7 @@ class VideosTab(QWidget):
         return self._selected_rows_from_highlight()
 
     def _video_link_for_row(self, row):
-        item = self.videos_table.item(row, 3)
+        item = self.videos_table.item(row, VIDEO_COLUMN_INDEX["Video Link"])
         if item is None:
             return ""
         text = item.text().strip()
@@ -1573,16 +3484,12 @@ class VideosTab(QWidget):
         thumb_pixmap = self._thumbnail_cache.get(thumb_url)
         if thumb_pixmap is None and thumb_item is not None:
             thumb_pixmap = thumb_item.data(Qt.ItemDataRole.DecorationRole)
-        return {
-            "Video ID": self.videos_table.item(row, 2).text().strip() if self.videos_table.item(row, 2) else "",
-            "Video Link": self.videos_table.item(row, 3).text().strip() if self.videos_table.item(row, 3) else "",
-            "Source": self.videos_table.item(row, 4).text().strip() if self.videos_table.item(row, 4) else "",
-            "Search Phrase": self.videos_table.item(row, 5).text().strip() if self.videos_table.item(row, 5) else "",
-            "Title": self.videos_table.item(row, 6).text().strip() if self.videos_table.item(row, 6) else "",
-            "Description": self.videos_table.item(row, 7).text().strip() if self.videos_table.item(row, 7) else "",
-            "Thumbnail URL": thumb_url,
-            "Thumbnail Pixmap": thumb_pixmap,
-        }
+        payload = {"Thumbnail URL": thumb_url, "Thumbnail Pixmap": thumb_pixmap}
+        for column_name in VIDEO_TEXT_COLUMNS:
+            col = VIDEO_COLUMN_INDEX[column_name]
+            item = self.videos_table.item(row, col)
+            payload[column_name] = item.text().strip() if item is not None else ""
+        return payload
 
     def _collect_video_payloads(self, rows):
         payloads = []
@@ -1654,6 +3561,431 @@ class VideosTab(QWidget):
         worker.finished.connect(worker.deleteLater)
         worker.start()
         dlg._details_worker = worker
+        dlg.exec()
+
+    def _open_analyze_video_tags_dialog(self):
+        rows = self._collect_current_rows_for_tag_analysis()
+        if not rows:
+            QMessageBox.warning(self, "Analyze Video Tags", "No videos available to analyze.")
+            return
+
+        dlg = AnalyzeVideoTagsDialog(self)
+        dlg.btn_file.clicked.connect(lambda: self._open_analyze_video_tags_file_menu(dlg))
+        dlg.btn_clear_filters.clicked.connect(dlg.reset_filters)
+        dlg.btn_clear.clicked.connect(dlg.clear_results)
+        worker = VideoTagsAnalyzeWorker(rows)
+        worker.progress_signal.connect(dlg.set_progress)
+        worker.finished_signal.connect(dlg.populate_rows)
+        worker.finished.connect(worker.deleteLater)
+        dlg._worker = worker
+        worker.start()
+        dlg.exec()
+
+    def _generate_title_word_stats(self, dialog, rows):
+        if dialog is None:
+            return
+        if dialog._worker is not None and dialog._worker.isRunning():
+            QMessageBox.information(self, "Analyze Titles", "Word stats generation is already running.")
+            return
+
+        target_rows = [dict(row) for row in (rows or []) if isinstance(row, dict)]
+        if not target_rows:
+            QMessageBox.warning(self, "Analyze Titles", "No rows available to analyze.")
+            return
+
+        dialog.btn_generate.setEnabled(False)
+        dialog.btn_generate.setText("Generating...")
+        dialog.lbl_total.setText(f"Processing: 0/{len(target_rows)}")
+        dialog.table.setRowCount(0)
+
+        worker = VideoTitleKeywordsAnalyzeWorker(
+            rows=target_rows,
+            word_count=dialog.selected_word_count(),
+            use_stop_words=dialog.chk_use_stop_words.isChecked(),
+            stop_words=dialog.stop_words(),
+        )
+        worker.progress_signal.connect(dialog.set_progress)
+        worker.finished_signal.connect(dialog.populate_rows)
+        worker.finished.connect(lambda: setattr(dialog, "_worker", None))
+        worker.finished.connect(worker.deleteLater)
+        dialog._worker = worker
+        worker.start()
+
+    def _analyze_video_tags_visible_rows(self, dialog):
+        if dialog is None:
+            return []
+        return list(dialog._filtered_rows(dialog._all_tag_rows))
+
+    def _export_analyze_video_tags_rows(self, dialog, rows=None, as_txt=False):
+        if dialog is None:
+            return
+        rows = list(rows) if rows is not None else self._analyze_video_tags_visible_rows(dialog)
+        if not rows:
+            QMessageBox.warning(self, "Analyze Video Tags", "No tag rows to export.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Video Tag Stats",
+            "analyze_video_tags.txt" if as_txt else "analyze_video_tags.csv",
+            "Text Files (*.txt)" if as_txt else "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8-sig") as handle:
+                if as_txt:
+                    handle.write(
+                        "Tags\tOccurrences in Listings\tPercentage in Listings\tAvg. Views per Tag\tAvg. Likes per Tag\n"
+                    )
+                else:
+                    handle.write(
+                        "Tags,Occurrences in Listings,Percentage in Listings,Avg. Views per Tag,Avg. Likes per Tag\n"
+                    )
+                for row in rows:
+                    cells = [
+                        str(row.get("tag", "")),
+                        str(int(row.get("occurrences", 0))),
+                        f"{float(row.get('percentage', 0.0)):.1f}",
+                        f"{float(row.get('avg_views', 0.0)):.1f}",
+                        f"{float(row.get('avg_likes', 0.0)):.1f}",
+                    ]
+                    if as_txt:
+                        handle.write("\t".join(cells) + "\n")
+                    else:
+                        escaped = [cell.replace('"', '""') for cell in cells]
+                        quoted = ['"' + cell + '"' for cell in escaped]
+                        handle.write(",".join(quoted) + "\n")
+        except Exception as exc:
+            QMessageBox.warning(self, "Analyze Video Tags", f"Failed to export file:\n{exc}")
+            return
+
+        self._set_status(f"Exported {len(rows)} tag row(s).")
+
+    def _copy_analyze_video_tags_rows_to_clipboard(self, dialog, rows=None, tags_only=False):
+        if dialog is None:
+            return
+        rows = list(rows) if rows is not None else self._analyze_video_tags_visible_rows(dialog)
+        if not rows:
+            QMessageBox.warning(self, "Analyze Video Tags", "No tag rows to copy.")
+            return
+
+        if tags_only:
+            text = "\n".join(
+                str(row.get("tag", "")).strip()
+                for row in rows
+                if str(row.get("tag", "")).strip()
+            )
+        else:
+            lines = [
+                "\t".join(
+                    [
+                        "Tags",
+                        "Occurrences in Listings",
+                        "Percentage in Listings",
+                        "Avg. Views per Tag",
+                        "Avg. Likes per Tag",
+                    ]
+                )
+            ]
+            for row in rows:
+                lines.append(
+                    "\t".join(
+                        [
+                            str(row.get("tag", "")),
+                            str(int(row.get("occurrences", 0))),
+                            f"{float(row.get('percentage', 0.0)):.1f}",
+                            f"{float(row.get('avg_views', 0.0)):.1f}",
+                            f"{float(row.get('avg_likes', 0.0)):.1f}",
+                        ]
+                    )
+                )
+            text = "\n".join(lines)
+
+        if not text.strip():
+            QMessageBox.warning(self, "Analyze Video Tags", "No tag rows to copy.")
+            return
+
+        QApplication.clipboard().setText(text)
+        self._set_status(f"Copied {len(rows)} tag row(s) to clipboard.")
+
+    def _open_analyze_video_tags_file_menu(self, dialog):
+        if dialog is None:
+            return
+
+        visible_rows = self._analyze_video_tags_visible_rows(dialog)
+        all_rows = list(dialog._all_tag_rows)
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background:#ffffff; color:#111111; border:1px solid #cfcfcf; }"
+            "QMenu::item { padding:6px 16px; }"
+            "QMenu::item:selected { background:#f3d0d3; color:#111111; }"
+        )
+
+        act_export_visible_csv = menu.addAction("Export VISIBLE rows to CSV")
+        act_export_all_csv = menu.addAction("Export ALL rows to CSV")
+        act_export_visible_txt = menu.addAction("Export VISIBLE rows to TXT")
+        act_export_all_txt = menu.addAction("Export ALL rows to TXT")
+        menu.addSeparator()
+
+        copy_menu = menu.addMenu("Copy")
+        act_copy_visible_rows = copy_menu.addAction("Copy VISIBLE rows to clipboard")
+        act_copy_all_rows = copy_menu.addAction("Copy ALL rows to clipboard")
+        act_copy_visible_tags = copy_menu.addAction("Copy VISIBLE tags")
+        act_copy_all_tags = copy_menu.addAction("Copy ALL tags")
+
+        chosen = menu.exec(dialog.btn_file.mapToGlobal(dialog.btn_file.rect().bottomLeft()))
+        if chosen is None:
+            return
+
+        if chosen == act_export_visible_csv:
+            self._export_analyze_video_tags_rows(dialog, rows=visible_rows, as_txt=False)
+        elif chosen == act_export_all_csv:
+            self._export_analyze_video_tags_rows(dialog, rows=all_rows, as_txt=False)
+        elif chosen == act_export_visible_txt:
+            self._export_analyze_video_tags_rows(dialog, rows=visible_rows, as_txt=True)
+        elif chosen == act_export_all_txt:
+            self._export_analyze_video_tags_rows(dialog, rows=all_rows, as_txt=True)
+        elif chosen == act_copy_visible_rows:
+            self._copy_analyze_video_tags_rows_to_clipboard(dialog, rows=visible_rows, tags_only=False)
+        elif chosen == act_copy_all_rows:
+            self._copy_analyze_video_tags_rows_to_clipboard(dialog, rows=all_rows, tags_only=False)
+        elif chosen == act_copy_visible_tags:
+            self._copy_analyze_video_tags_rows_to_clipboard(dialog, rows=visible_rows, tags_only=True)
+        elif chosen == act_copy_all_tags:
+            self._copy_analyze_video_tags_rows_to_clipboard(dialog, rows=all_rows, tags_only=True)
+
+    def _analyze_titles_visible_rows(self, dialog):
+        if dialog is None:
+            return []
+        return list(dialog._filtered_rows(dialog._all_word_rows))
+
+    def _export_analyze_titles_rows(self, dialog, rows=None, as_txt=False):
+        if dialog is None:
+            return
+        rows = list(rows) if rows is not None else self._analyze_titles_visible_rows(dialog)
+        if not rows:
+            QMessageBox.warning(self, "Analyze Titles", "No title keyword rows to export.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Title Word Stats",
+            "analyze_titles.txt" if as_txt else "analyze_titles.csv",
+            "Text Files (*.txt)" if as_txt else "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8-sig") as handle:
+                if as_txt:
+                    handle.write(
+                        "Word Combination\tOccurrences in Titles\tPercentage in Titles\tAvg. Views\tAvg. Likes\tNumber of Words\n"
+                    )
+                else:
+                    handle.write(
+                        "Word Combination,Occurrences in Titles,Percentage in Titles,Avg. Views,Avg. Likes,Number of Words\n"
+                    )
+                for row in rows:
+                    cells = [
+                        str(row.get("phrase", "")),
+                        str(int(row.get("occurrences", 0))),
+                        f"{float(row.get('percentage', 0.0)):.1f}",
+                        f"{float(row.get('avg_views', 0.0)):.1f}",
+                        f"{float(row.get('avg_likes', 0.0)):.1f}",
+                        str(int(row.get("word_count", 0))),
+                    ]
+                    if as_txt:
+                        handle.write("\t".join(cells) + "\n")
+                    else:
+                        escaped = [cell.replace('"', '""') for cell in cells]
+                        quoted = ['"' + cell + '"' for cell in escaped]
+                        handle.write(",".join(quoted) + "\n")
+        except Exception as exc:
+            QMessageBox.warning(self, "Analyze Titles", f"Failed to export file:\n{exc}")
+            return
+
+        self._set_status(f"Exported {len(rows)} title keyword rows.")
+
+    def _copy_analyze_titles_rows_to_clipboard(self, dialog, rows=None, words_only=False):
+        if dialog is None:
+            return
+        rows = list(rows) if rows is not None else self._analyze_titles_visible_rows(dialog)
+        if not rows:
+            QMessageBox.warning(self, "Analyze Titles", "No title keyword rows to copy.")
+            return
+
+        if words_only:
+            text = "\n".join(
+                str(row.get("phrase", "")).strip()
+                for row in rows
+                if str(row.get("phrase", "")).strip()
+            )
+        else:
+            lines = [
+                "\t".join(
+                    [
+                        "Word Combination",
+                        "Occurrences in Titles",
+                        "Percentage in Titles",
+                        "Avg. Views",
+                        "Avg. Likes",
+                        "Number of Words",
+                    ]
+                )
+            ]
+            for row in rows:
+                lines.append(
+                    "\t".join(
+                        [
+                            str(row.get("phrase", "")),
+                            str(int(row.get("occurrences", 0))),
+                            f"{float(row.get('percentage', 0.0)):.1f}",
+                            f"{float(row.get('avg_views', 0.0)):.1f}",
+                            f"{float(row.get('avg_likes', 0.0)):.1f}",
+                            str(int(row.get("word_count", 0))),
+                        ]
+                    )
+                )
+            text = "\n".join(lines)
+
+        if not text.strip():
+            QMessageBox.warning(self, "Analyze Titles", "No title keyword rows to copy.")
+            return
+
+        QApplication.clipboard().setText(text)
+        self._set_status(f"Copied {len(rows)} title keyword row(s) to clipboard.")
+
+    def _open_analyze_titles_file_menu(self, dialog):
+        if dialog is None:
+            return
+
+        visible_rows = self._analyze_titles_visible_rows(dialog)
+        all_rows = list(dialog._all_word_rows)
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background:#ffffff; color:#111111; border:1px solid #cfcfcf; }"
+            "QMenu::item { padding:6px 16px; }"
+            "QMenu::item:selected { background:#f3d0d3; color:#111111; }"
+        )
+
+        act_export_visible_csv = menu.addAction("Export VISIBLE rows to CSV")
+        act_export_all_csv = menu.addAction("Export ALL rows to CSV")
+        act_export_visible_txt = menu.addAction("Export VISIBLE rows to TXT")
+        act_export_all_txt = menu.addAction("Export ALL rows to TXT")
+        menu.addSeparator()
+
+        copy_menu = menu.addMenu("Copy")
+        act_copy_visible_rows = copy_menu.addAction("Copy VISIBLE rows to clipboard")
+        act_copy_all_rows = copy_menu.addAction("Copy ALL rows to clipboard")
+        act_copy_visible_words = copy_menu.addAction("Copy VISIBLE word combinations")
+        act_copy_all_words = copy_menu.addAction("Copy ALL word combinations")
+
+        chosen = menu.exec(dialog.btn_file.mapToGlobal(dialog.btn_file.rect().bottomLeft()))
+        if chosen is None:
+            return
+
+        if chosen == act_export_visible_csv:
+            self._export_analyze_titles_rows(dialog, rows=visible_rows, as_txt=False)
+        elif chosen == act_export_all_csv:
+            self._export_analyze_titles_rows(dialog, rows=all_rows, as_txt=False)
+        elif chosen == act_export_visible_txt:
+            self._export_analyze_titles_rows(dialog, rows=visible_rows, as_txt=True)
+        elif chosen == act_export_all_txt:
+            self._export_analyze_titles_rows(dialog, rows=all_rows, as_txt=True)
+        elif chosen == act_copy_visible_rows:
+            self._copy_analyze_titles_rows_to_clipboard(dialog, rows=visible_rows, words_only=False)
+        elif chosen == act_copy_all_rows:
+            self._copy_analyze_titles_rows_to_clipboard(dialog, rows=all_rows, words_only=False)
+        elif chosen == act_copy_visible_words:
+            self._copy_analyze_titles_rows_to_clipboard(dialog, rows=visible_rows, words_only=True)
+        elif chosen == act_copy_all_words:
+            self._copy_analyze_titles_rows_to_clipboard(dialog, rows=all_rows, words_only=True)
+
+    def _open_stop_words_file_menu(self, dialog):
+        if dialog is None:
+            return
+        menu = QMenu(self)
+        act_load = menu.addAction("Load TXT")
+        act_save = menu.addAction("Save TXT")
+        chosen = menu.exec(dialog.btn_file.mapToGlobal(dialog.btn_file.rect().bottomLeft()))
+        if chosen == act_load:
+            self._load_stop_words_from_txt(dialog)
+        elif chosen == act_save:
+            self._save_stop_words_to_txt(dialog)
+
+    def _load_stop_words_from_txt(self, dialog):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Stop Words TXT",
+            "",
+            "Text Files (*.txt);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8-sig") as handle:
+                text_data = handle.read()
+        except Exception:
+            try:
+                with open(file_path, "r", encoding="utf-8") as handle:
+                    text_data = handle.read()
+            except Exception as exc:
+                QMessageBox.warning(self, "Stop Words", f"Failed to read file:\n{exc}")
+                return
+
+        dialog.text_words.setPlainText(str(text_data or "").strip())
+
+    def _save_stop_words_to_txt(self, dialog):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Stop Words TXT",
+            "stop_words.txt",
+            "Text Files (*.txt);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "w", encoding="utf-8-sig") as handle:
+                handle.write(dialog.text_words.toPlainText())
+        except Exception as exc:
+            QMessageBox.warning(self, "Stop Words", f"Failed to save file:\n{exc}")
+
+    def _open_analyze_title_keywords_dialog(self):
+        rows = self._collect_current_rows_for_title_analysis()
+        if not rows:
+            QMessageBox.warning(self, "Analyze Titles", "No videos available to analyze.")
+            return
+
+        dlg = AnalyzeVideoTitleKeywordsDialog(self, stop_words=self._title_analysis_stop_words)
+        dlg.btn_generate.clicked.connect(lambda: self._generate_title_word_stats(dlg, rows))
+        dlg.btn_stop_words.clicked.connect(lambda: self._open_stop_words_dialog(dlg))
+        dlg.btn_file.clicked.connect(lambda: self._open_analyze_titles_file_menu(dlg))
+        dlg.btn_clear_filters.clicked.connect(dlg.reset_filters)
+        dlg.btn_clear.clicked.connect(dlg.clear_results)
+        dlg.exec()
+
+    def _open_stop_words_dialog(self, owner_dialog=None):
+        current_words = (
+            owner_dialog.stop_words()
+            if owner_dialog is not None and hasattr(owner_dialog, "stop_words")
+            else list(self._title_analysis_stop_words)
+        )
+        dlg = StopWordsDialog(self, stop_words=current_words)
+        dlg.btn_file.clicked.connect(lambda: self._open_stop_words_file_menu(dlg))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated_words = dlg.stop_words()
+        self._title_analysis_stop_words = list(updated_words)
+        if owner_dialog is not None and hasattr(owner_dialog, "set_stop_words"):
+            owner_dialog.set_stop_words(updated_words)
+
+    def _open_browse_extract_dialog(self):
+        dlg = BrowseAndExtractDialog(self)
         dlg.exec()
 
     def _download_selected_videos(self, rows):
@@ -1743,7 +4075,7 @@ class VideosTab(QWidget):
                 if link:
                     lines.append(link)
         else:
-            col_indices = [2, 3, 4, 5, 6, 7]
+            col_indices = list(range(2, self.videos_table.columnCount()))
             headers = [self.videos_table.horizontalHeaderItem(c).text().strip() for c in col_indices]
             lines.append("\t".join(headers))
             for row in rows:
@@ -1817,9 +4149,9 @@ class VideosTab(QWidget):
         act_download_video.triggered.connect(lambda: self._download_selected_videos(selected_rows))
         videos_tool_menu.addSeparator()
         act_analyze_tags = videos_tool_menu.addAction("Analyze video tags")
-        act_analyze_tags.triggered.connect(lambda: self._show_coming_soon("Analyze video tags"))
+        act_analyze_tags.triggered.connect(self._open_analyze_video_tags_dialog)
         act_analyze_keywords = videos_tool_menu.addAction("Analyze keywords in video titles")
-        act_analyze_keywords.triggered.connect(lambda: self._show_coming_soon("Analyze keywords in video titles"))
+        act_analyze_keywords.triggered.connect(self._open_analyze_title_keywords_dialog)
 
         checkbox_menu = menu.addMenu("Checkboxes")
         act_check_selected = checkbox_menu.addAction("Check SELECTED rows")
@@ -2012,16 +4344,27 @@ class VideosTab(QWidget):
     def _collect_current_rows_for_analyze(self):
         rows = []
         for row in range(self.videos_table.rowCount()):
-            rows.append(
-                {
-                    "Video ID": self.videos_table.item(row, 2).text().strip() if self.videos_table.item(row, 2) else "",
-                    "Video Link": self.videos_table.item(row, 3).text().strip() if self.videos_table.item(row, 3) else "",
-                    "Source": self.videos_table.item(row, 4).text().strip() if self.videos_table.item(row, 4) else "",
-                    "Search Phrase": self.videos_table.item(row, 5).text().strip() if self.videos_table.item(row, 5) else "",
-                    "Title": self.videos_table.item(row, 6).text().strip() if self.videos_table.item(row, 6) else "",
-                    "Description": self.videos_table.item(row, 7).text().strip() if self.videos_table.item(row, 7) else "",
-                }
-            )
+            rows.append(self._row_payload(row))
+        return rows
+
+    def _collect_current_rows_for_tag_analysis(self):
+        rows = []
+        wanted_keys = {"Channel", "Tags", "View Count"}
+        for row in range(self.videos_table.rowCount()):
+            payload = self._row_payload(row)
+            if not payload:
+                continue
+            rows.append({key: str(payload.get(key, "")).strip() for key in wanted_keys})
+        return rows
+
+    def _collect_current_rows_for_title_analysis(self):
+        rows = []
+        wanted_keys = {"Title", "View Count", "Likes"}
+        for row in range(self.videos_table.rowCount()):
+            payload = self._row_payload(row)
+            if not payload:
+                continue
+            rows.append({key: str(payload.get(key, "")).strip() for key in wanted_keys})
         return rows
 
     def _build_analyze_metrics(self, rows):
@@ -2114,3 +4457,34 @@ class VideosTab(QWidget):
                 f"Received {len(cleaned)} keywords from {src}. Using first keyword for now."
             )
         return True
+
+    def closeEvent(self, event):
+        for worker_name in (
+            "_search_worker",
+            "_trending_worker",
+            "_import_worker",
+            "_download_worker",
+            "_metadata_worker",
+        ):
+            worker = getattr(self, worker_name, None)
+            if worker is None:
+                continue
+            try:
+                if worker.isRunning():
+                    if hasattr(worker, "stop"):
+                        worker.stop()
+                    worker.wait(1200)
+            except Exception:
+                pass
+
+        for worker in list(self._thumbnail_fallback_workers.values()):
+            try:
+                if worker is not None and worker.isRunning():
+                    worker.requestInterruption()
+                    worker.wait(500)
+            except Exception:
+                pass
+        self._thumbnail_fallback_workers.clear()
+        self._thumbnail_inflight.clear()
+        self._thumbnail_pending_rows.clear()
+        super().closeEvent(event)

@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
-import numpy as np
 from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
@@ -44,12 +43,13 @@ try:
 except ImportError:  # pragma: no cover
     requests = None
 
-try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-    _QTWEBENGINE_IMPORT_ERROR = ""
-except Exception as _qtwebengine_exc:
-    QWebEngineView = None
-    _QTWEBENGINE_IMPORT_ERROR = str(_qtwebengine_exc)
+TRENDS_NUMERIC_FILTER_COLUMNS = {
+    6: "Word Count",
+    7: "Character Count",
+    8: "Total Average",
+    9: "Trend Slope",
+    10: "Trending Spike",
+}
 
 
 def build_daily_series(raw_data):
@@ -82,10 +82,10 @@ def build_daily_series(raw_data):
 
     sorted_days = sorted(day_value_map.keys())
     base_dates = [datetime.combine(day, datetime.min.time()) for day in sorted_days]
-    base_values = np.array([day_value_map[day] for day in sorted_days], dtype=float)
+    base_values = [float(day_value_map[day]) for day in sorted_days]
 
     if len(base_dates) == 1:
-        return base_dates, [float(base_values[0])]
+        return base_dates, [base_values[0]]
 
     start_day = sorted_days[0]
     end_day = sorted_days[-1]
@@ -95,11 +95,44 @@ def build_daily_series(raw_data):
         for idx in range(day_count)
     ]
 
-    x_known = np.array([dt.toordinal() for dt in base_dates], dtype=float)
-    x_full = np.array([dt.toordinal() for dt in daily_dates], dtype=float)
-    y_full = np.interp(x_full, x_known, base_values)
+    known_map = {
+        dt.date(): float(value)
+        for dt, value in zip(base_dates, base_values)
+    }
 
-    return daily_dates, y_full.astype(float).tolist()
+    daily_values = []
+    sorted_value_days = sorted(known_map.keys())
+    current_index = 0
+
+    for day in (dt.date() for dt in daily_dates):
+        if day in known_map:
+            daily_values.append(float(known_map[day]))
+            continue
+
+        while (
+            current_index + 1 < len(sorted_value_days)
+            and sorted_value_days[current_index + 1] < day
+        ):
+            current_index += 1
+
+        prev_day = sorted_value_days[current_index]
+        next_idx = min(current_index + 1, len(sorted_value_days) - 1)
+        next_day = sorted_value_days[next_idx]
+
+        prev_val = float(known_map[prev_day])
+        next_val = float(known_map[next_day])
+
+        if next_day == prev_day:
+            daily_values.append(prev_val)
+            continue
+
+        span = (next_day - prev_day).days
+        offset = (day - prev_day).days
+        ratio = max(0.0, min(1.0, float(offset) / float(span)))
+        interpolated = prev_val + (next_val - prev_val) * ratio
+        daily_values.append(float(interpolated))
+
+    return daily_dates, daily_values
 
 
 class TrendChartDialog(QDialog):
@@ -616,6 +649,8 @@ class TrendsTab(QWidget):
         self.browser_panel_layout = None
         self.browser_placeholder = None
         self._webengine_error = ""
+        self._qwebengine_view_class = None
+        self._qwebengine_import_attempted = False
         self.trends_splitter = None
         self._use_embedded_browser_mode = False
         self._run_pytrends_with_external_browser = True
@@ -633,6 +668,7 @@ class TrendsTab(QWidget):
         self._filter_category_value = ""
         self._filter_property_value = ""
         self._filter_checked_only = False
+        self._filter_numeric_rules = {}
         self._proxy_panel_hidden = False
         proxy_settings = (
             self.main_window.get_proxy_settings()
@@ -1425,11 +1461,13 @@ class TrendsTab(QWidget):
         self._update_chart_header_label()
 
     def _on_trends_header_clicked(self, column):
-        if column != 0:
+        if column == 0:
+            if self.trends_table.rowCount() <= 0:
+                return
+            self._set_all_chart_checkboxes(not self._chart_header_checked)
             return
-        if self.trends_table.rowCount() <= 0:
-            return
-        self._set_all_chart_checkboxes(not self._chart_header_checked)
+        if column in TRENDS_NUMERIC_FILTER_COLUMNS:
+            self._set_numeric_filter_dialog(column)
 
     def _on_trends_item_changed(self, item):
         if self._chart_check_syncing:
@@ -1592,13 +1630,30 @@ class TrendsTab(QWidget):
         if idx >= 0:
             self.t_combo_prop.setCurrentIndex(idx)
 
+    def _get_qwebengine_view_class(self):
+        if self._qwebengine_import_attempted:
+            return self._qwebengine_view_class
+
+        self._qwebengine_import_attempted = True
+        try:
+            from PyQt6.QtWebEngineWidgets import QWebEngineView as ImportedWebEngineView
+        except Exception as exc:
+            self._qwebengine_view_class = None
+            self._webengine_error = str(exc)
+            return None
+
+        self._qwebengine_view_class = ImportedWebEngineView
+        self._webengine_error = ""
+        return self._qwebengine_view_class
+
     def _ensure_embedded_browser(self):
         if self.browser_view is not None:
             return True
 
-        if QWebEngineView is None:
+        qwebengine_view_class = self._get_qwebengine_view_class()
+        if qwebengine_view_class is None:
             self._webengine_available = False
-            self._webengine_error = _QTWEBENGINE_IMPORT_ERROR or "PyQt6-WebEngine import failed."
+            self._webengine_error = self._webengine_error or "PyQt6-WebEngine import failed."
             if self.browser_placeholder is not None:
                 self.browser_placeholder.setText(
                     "Embedded browser could not load.\n"
@@ -1609,7 +1664,7 @@ class TrendsTab(QWidget):
             return False
 
         try:
-            self.browser_view = QWebEngineView()
+            self.browser_view = qwebengine_view_class()
             self._webengine_available = True
             self._webengine_error = ""
 
@@ -2300,12 +2355,79 @@ class TrendsTab(QWidget):
         item = self.trends_table.item(row, col)
         return item.text().strip() if item is not None else ""
 
+    @staticmethod
+    def _parse_numeric_value(raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        cleaned = text.replace(",", "").replace("+", "").strip()
+        match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _evaluate_numeric_rule(value, expression):
+        expr = str(expression or "").strip()
+        if not expr:
+            return True
+        match = re.fullmatch(r"(>=|<=|!=|==|=|>|<)\s*(-?\d+(?:\.\d+)?)", expr)
+        if not match:
+            return None
+        operator = match.group(1)
+        target = float(match.group(2))
+        if operator == ">":
+            return value > target
+        if operator == "<":
+            return value < target
+        if operator == ">=":
+            return value >= target
+        if operator == "<=":
+            return value <= target
+        if operator in {"=", "=="}:
+            return value == target
+        if operator == "!=":
+            return value != target
+        return None
+
     def _selected_row_for_filter(self):
         rows = self._selected_trend_rows()
         if not rows:
             self._warn_select_rows()
             return -1
         return rows[0]
+
+    def _set_numeric_filter_dialog(self, column):
+        column_name = TRENDS_NUMERIC_FILTER_COLUMNS.get(column, f"Column {column}")
+        current = str(self._filter_numeric_rules.get(column, "")).strip()
+        text, ok = QInputDialog.getText(
+            self,
+            f"Filter {column_name}",
+            f"{column_name} condition:\nExamples: >10, >=100, <5, =0, !=2",
+            text=current,
+        )
+        if not ok:
+            return
+
+        expr = str(text or "").strip()
+        if not expr:
+            self._filter_numeric_rules.pop(column, None)
+            self._apply_trends_filters()
+            return
+
+        if self._evaluate_numeric_rule(1.0, expr) is None:
+            QMessageBox.warning(
+                self,
+                "Filter",
+                "Numeric filter format is invalid. Use examples like >10, >=100, <5, =0.",
+            )
+            return
+
+        self._filter_numeric_rules[column] = expr
+        self._apply_trends_filters()
 
     def _filter_summary(self):
         tags = []
@@ -2319,6 +2441,9 @@ class TrendsTab(QWidget):
             tags.append(f"property='{self._filter_property_value}'")
         if self._filter_checked_only:
             tags.append("checked-only")
+        for column, expression in sorted(self._filter_numeric_rules.items()):
+            column_name = TRENDS_NUMERIC_FILTER_COLUMNS.get(column, f"col{column}")
+            tags.append(f"{column_name}{expression}")
         return ", ".join(tags)
 
     def _apply_trends_filters(self):
@@ -2347,6 +2472,13 @@ class TrendsTab(QWidget):
                 chart_item = self.trends_table.item(row, 0)
                 row_visible = chart_item is not None and chart_item.checkState() == Qt.CheckState.Checked
 
+            if row_visible and self._filter_numeric_rules:
+                for column, expression in self._filter_numeric_rules.items():
+                    parsed_value = self._parse_numeric_value(self._text_at(row, column))
+                    if parsed_value is None or self._evaluate_numeric_rule(parsed_value, expression) is not True:
+                        row_visible = False
+                        break
+
             self.trends_table.setRowHidden(row, not row_visible)
             if row_visible:
                 visible += 1
@@ -2363,6 +2495,7 @@ class TrendsTab(QWidget):
         self._filter_category_value = ""
         self._filter_property_value = ""
         self._filter_checked_only = False
+        self._filter_numeric_rules = {}
         if update_ui:
             self._apply_trends_filters()
 

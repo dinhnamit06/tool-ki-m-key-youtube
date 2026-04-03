@@ -130,3 +130,14 @@ QCheckBox#toggle_switch { color: #ffffff; font-weight: bold; font-size: 13px; sp
 QCheckBox#toggle_switch::indicator { width: 36px; height: 18px; border-radius: 9px; background-color: #444444; border: 2px solid #333333; }
 QCheckBox#toggle_switch::indicator:checked { background-color: #e50914; }
 """
+
+TABLE_SCROLLBAR_STYLE = """
+QScrollBar:horizontal { background:#d9d9d9; height:14px; margin:0; }
+QScrollBar::handle:horizontal { background:#4a90e2; min-width:80px; border-radius:4px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:#efefef; }
+QScrollBar:vertical { background:#d9d9d9; width:14px; margin:0; }
+QScrollBar::handle:vertical { background:#4a90e2; min-height:60px; border-radius:4px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:#efefef; }
+"""

@@ -3,7 +3,6 @@ import threading
 import time
 from urllib.parse import urlencode
 
-import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from utils.constants import CAT_MAP, GEO_MAP, PROP_MAP, TIME_MAP
@@ -85,6 +84,34 @@ class TrendsFetcherWorker(QThread):
         if gprop:
             params["gprop"] = gprop
         return f"https://trends.google.com/trends/explore?{urlencode(params)}"
+
+    @staticmethod
+    def _mean(values):
+        nums = [float(v) for v in (values or [])]
+        return (sum(nums) / len(nums)) if nums else 0.0
+
+    @staticmethod
+    def _max(values):
+        nums = [float(v) for v in (values or [])]
+        return max(nums) if nums else 0.0
+
+    @staticmethod
+    def _slope(values):
+        nums = [float(v) for v in (values or [])]
+        n = len(nums)
+        if n <= 1:
+            return 0.0
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(nums) / n
+        numerator = 0.0
+        denominator = 0.0
+        for idx, value in enumerate(nums):
+            dx = idx - x_mean
+            numerator += dx * (value - y_mean)
+            denominator += dx * dx
+        if denominator == 0:
+            return 0.0
+        return numerator / denominator
 
     @staticmethod
     def _is_rate_limit_error(error_text):
@@ -227,27 +254,26 @@ class TrendsFetcherWorker(QThread):
         trends_url = self._build_google_trends_url(kw, tf_code, geo_code, gprop_code)
 
         if df.empty or kw not in df.columns:
-            values = np.array([], dtype=float)
+            values = []
             raw_points = []
         else:
             series = df[kw].astype(float)
-            values = series.values
+            values = [float(v) for v in series.values.tolist()]
             raw_points = [{"date": d.strftime("%Y-%m-%d"), "value": float(v)} for d, v in series.items()]
 
-        total_avg = round(float(np.mean(values)), 2) if len(values) > 0 else 0.0
-        x = np.arange(len(values), dtype=float)
+        total_avg = round(float(self._mean(values)), 2) if len(values) > 0 else 0.0
         try:
-            slope = round(float(np.polyfit(x, values, 1)[0]), 3) if len(values) > 1 else 0.0
+            slope = round(float(self._slope(values)), 3) if len(values) > 1 else 0.0
         except Exception:
             slope = 0.0
 
         if len(values) >= 30:
-            last_30_avg = float(np.mean(values[-30:]))
-            last_7_max = float(np.max(values[-7:]))
+            last_30_avg = float(self._mean(values[-30:]))
+            last_7_max = float(self._max(values[-7:]))
             spike = round(last_7_max - last_30_avg, 2)
         elif len(values) > 0:
-            last_7_max = float(np.max(values[-min(7, len(values)) :]))
-            spike = round(last_7_max - float(np.mean(values)), 2)
+            last_7_max = float(self._max(values[-min(7, len(values)) :]))
+            spike = round(last_7_max - float(self._mean(values)), 2)
         else:
             spike = 0.0
 
