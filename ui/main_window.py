@@ -1,3 +1,5 @@
+import os
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QStackedWidget, QSizePolicy
 )
@@ -7,10 +9,18 @@ from ui.keywords_tab import KeywordsTab
 from ui.trends_tab import TrendsTab
 from ui.videos_tab import VideosTab
 from utils.constants import MAIN_STYLE
+from utils.proxy_utils import normalize_proxy
 
 class TubeVibeApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.proxy_settings = {
+            "enabled": False,
+            "proxies": [],
+        }
+        self.proxy_runtime_settings = {
+            "max_proxies_per_run": 30,
+        }
         self.setWindowTitle("TubeVibe - YouTube Research Pro")
         self.resize(1280, 800)
         self.setup_ui()
@@ -95,3 +105,49 @@ class TubeVibeApp(QMainWindow):
         self.statusBar().showMessage(
             f"Sent {len(keywords)} keywords to Videos tool from {src}.", 4000
         )
+
+    def get_proxy_settings(self):
+        return {
+            "enabled": bool(self.proxy_settings.get("enabled", False)),
+            "proxies": list(self.proxy_settings.get("proxies", [])),
+        }
+
+    def set_proxy_settings(self, enabled=False, proxies=None):
+        clean_proxies = []
+        seen = set()
+        for proxy in proxies or []:
+            text = normalize_proxy(proxy)
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            clean_proxies.append(text)
+
+        self.proxy_settings = {
+            "enabled": bool(enabled),
+            "proxies": clean_proxies,
+        }
+
+        if self.proxy_settings["enabled"] and self.proxy_settings["proxies"]:
+            first_proxy = self.proxy_settings["proxies"][0]
+            os.environ["HTTP_PROXY"] = first_proxy
+            os.environ["HTTPS_PROXY"] = first_proxy
+            os.environ["http_proxy"] = first_proxy
+            os.environ["https_proxy"] = first_proxy
+        else:
+            os.environ.pop("HTTP_PROXY", None)
+            os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("http_proxy", None)
+            os.environ.pop("https_proxy", None)
+
+    def get_proxy_runtime_settings(self):
+        return {
+            "max_proxies_per_run": max(1, int(self.proxy_runtime_settings.get("max_proxies_per_run", 30))),
+        }
+
+    def set_proxy_runtime_settings(self, max_proxies_per_run=30):
+        self.proxy_runtime_settings = {
+            "max_proxies_per_run": max(1, int(max_proxies_per_run)),
+        }

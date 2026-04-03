@@ -7,6 +7,7 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from utils.constants import CAT_MAP, GEO_MAP, PROP_MAP, TIME_MAP
+from utils.proxy_utils import normalize_proxy, to_requests_proxies
 
 
 class TrendsFetcherWorker(QThread):
@@ -25,7 +26,12 @@ class TrendsFetcherWorker(QThread):
         pause_after_connections=20,
         pause_min_seconds=10,
         pause_max_seconds=60,
+        enable_pause_after_connections=True,
         max_workers=1,
+        use_proxies=False,
+        proxy_list=None,
+        enable_max_consecutive_proxy_connections=True,
+        max_consecutive_web_connections_per_proxy=50,
     ):
         super().__init__()
         self.keywords = list(keywords)
@@ -42,6 +48,7 @@ class TrendsFetcherWorker(QThread):
         self.pause_after_connections = int(pause_after_connections)
         self.pause_min_seconds = int(pause_min_seconds)
         self.pause_max_seconds = int(pause_max_seconds)
+        self.enable_pause_after_connections = bool(enable_pause_after_connections)
 
         self._thread_local = threading.local()
         self.total_requests_made = 0
@@ -53,6 +60,22 @@ class TrendsFetcherWorker(QThread):
         self._burst_delay_max = 1.6
         self._slow_request_threshold_seconds = 8.0
         self._rate_limit_events = 0
+        self.use_proxies = bool(use_proxies)
+        self.proxy_list = [p for p in (normalize_proxy(x) for x in (proxy_list or [])) if p]
+        self._proxy_cursor = -1
+        self.enable_max_consecutive_proxy_connections = bool(enable_max_consecutive_proxy_connections)
+        self.max_consecutive_web_connections_per_proxy = max(1, int(max_consecutive_web_connections_per_proxy))
+        self._active_proxy_index = 0
+        self._active_proxy_use_count = 0
+
+        if self.use_proxies and self.proxy_list:
+            # Faster baseline when we can rotate across proxies.
+            self._delay_min_seconds = 0.8
+            self._delay_max_seconds = 1.6
+            self._burst_keywords = 5
+            self._burst_delay_min = 0.2
+            self._burst_delay_max = 0.7
+            self._slow_request_threshold_seconds = 6.5
 
     @staticmethod
     def _build_google_trends_url(keyword, timeframe, geo, gprop):
@@ -89,19 +112,20 @@ class TrendsFetcherWorker(QThread):
 
     def _update_dynamic_delay(self, last_request_seconds, rate_limited=False):
         avg_recent = self._recent_average_request_seconds(window=5)
+        floor_min = 0.4 if (self.use_proxies and self.proxy_list) else 1.2
 
         if rate_limited:
-            self._delay_min_seconds = self._clamp(self._delay_min_seconds + 0.7, 1.2, 6.5)
+            self._delay_min_seconds = self._clamp(self._delay_min_seconds + 0.7, floor_min, 6.5)
             self._delay_max_seconds = self._clamp(self._delay_max_seconds + 1.0, 2.0, 8.5)
             return
 
         if last_request_seconds >= self._slow_request_threshold_seconds or avg_recent >= 7.0:
-            self._delay_min_seconds = self._clamp(self._delay_min_seconds + 0.35, 1.2, 6.5)
+            self._delay_min_seconds = self._clamp(self._delay_min_seconds + 0.35, floor_min, 6.5)
             self._delay_max_seconds = self._clamp(self._delay_max_seconds + 0.5, 2.0, 8.5)
             return
 
         if last_request_seconds <= 3.0 and avg_recent <= 4.0:
-            self._delay_min_seconds = self._clamp(self._delay_min_seconds - 0.15, 1.2, 6.5)
+            self._delay_min_seconds = self._clamp(self._delay_min_seconds - 0.15, floor_min, 6.5)
             self._delay_max_seconds = self._clamp(self._delay_max_seconds - 0.2, 2.0, 8.5)
 
     def _next_inter_keyword_delay(self, keyword_index):
@@ -144,15 +168,60 @@ class TrendsFetcherWorker(QThread):
 
             time.sleep(min(0.2, max(0.05, remaining)))
 
-    def _get_thread_pytrends(self):
-        if not hasattr(self._thread_local, "client"):
+    def _next_proxy_url(self):
+        if not self.use_proxies or not self.proxy_list:
+            return ""
+        if not self.enable_max_consecutive_proxy_connections:
+            self._proxy_cursor = (self._proxy_cursor + 1) % len(self.proxy_list)
+            return self.proxy_list[self._proxy_cursor]
+
+        if self._active_proxy_use_count >= self.max_consecutive_web_connections_per_proxy:
+            self._active_proxy_index = (self._active_proxy_index + 1) % len(self.proxy_list)
+            self._active_proxy_use_count = 0
+
+        proxy = self.proxy_list[self._active_proxy_index]
+        self._active_proxy_use_count += 1
+        return proxy
+
+    def _force_next_proxy(self):
+        if not self.use_proxies or len(self.proxy_list) <= 1:
+            return
+        if self.enable_max_consecutive_proxy_connections:
+            self._active_proxy_index = (self._active_proxy_index + 1) % len(self.proxy_list)
+            self._active_proxy_use_count = 0
+            return
+        self._proxy_cursor = (self._proxy_cursor + 1) % len(self.proxy_list)
+
+    @staticmethod
+    def _proxy_label(proxy_url):
+        text = str(proxy_url or "").strip()
+        if not text:
+            return ""
+        text = text.split("://", 1)[-1]
+        if "@" in text:
+            text = text.split("@", 1)[-1]
+        return text
+
+    def _get_thread_pytrends(self, proxy_url=""):
+        proxy_key = str(proxy_url or "").strip()
+        current_proxy_key = getattr(self._thread_local, "proxy_key", None)
+        if not hasattr(self._thread_local, "client") or current_proxy_key != proxy_key:
             from pytrends.request import TrendReq
 
-            self._thread_local.client = TrendReq(hl="en-US", tz=360)
+            requests_args = {}
+            proxy_dict = to_requests_proxies(proxy_key)
+            if proxy_dict:
+                requests_args["proxies"] = proxy_dict
+
+            if requests_args:
+                self._thread_local.client = TrendReq(hl="en-US", tz=360, requests_args=requests_args)
+            else:
+                self._thread_local.client = TrendReq(hl="en-US", tz=360)
+            self._thread_local.proxy_key = proxy_key
         return self._thread_local.client
 
-    def _build_payload_for_keyword(self, kw, cat_code, tf_code, geo_code, gprop_code):
-        pytrends = self._get_thread_pytrends()
+    def _build_payload_for_keyword(self, kw, cat_code, tf_code, geo_code, gprop_code, proxy_url=""):
+        pytrends = self._get_thread_pytrends(proxy_url=proxy_url)
         pytrends.build_payload([kw], cat=cat_code, timeframe=tf_code, geo=geo_code, gprop=gprop_code)
         df = pytrends.interest_over_time()
         trends_url = self._build_google_trends_url(kw, tf_code, geo_code, gprop_code)
@@ -230,8 +299,16 @@ class TrendsFetcherWorker(QThread):
                     break
 
                 start_ts = time.time()
+                request_proxy = self._next_proxy_url()
                 try:
-                    payload = self._build_payload_for_keyword(kw, cat_code, tf_code, geo_code, gprop_code)
+                    payload = self._build_payload_for_keyword(
+                        kw,
+                        cat_code,
+                        tf_code,
+                        geo_code,
+                        gprop_code,
+                        proxy_url=request_proxy,
+                    )
                     duration_seconds = time.time() - start_ts
                     self.total_requests_made += 1
                     self._record_request_time(duration_seconds)
@@ -245,6 +322,8 @@ class TrendsFetcherWorker(QThread):
                     payload["TotalKeywords"] = total_keywords
                     payload["KeywordIndex"] = keyword_index
                     payload["RequestSeconds"] = round(duration_seconds, 2)
+                    if request_proxy:
+                        payload["Proxy"] = self._proxy_label(request_proxy)
                     self.progress_signal.emit(payload)
                 except Exception as exc:
                     duration_seconds = time.time() - start_ts
@@ -257,8 +336,17 @@ class TrendsFetcherWorker(QThread):
                         keyword_rate_limited = True
                         self._rate_limit_events += 1
                         self._update_dynamic_delay(duration_seconds, rate_limited=True)
+                        self._force_next_proxy()
+                        proxy_hint = self._proxy_label(request_proxy)
+                        if proxy_hint:
+                            self.status_signal.emit(
+                                f"Rate limit on '{kw}' via proxy {proxy_hint}."
+                            )
                         if attempt == 1:
-                            wait_seconds = random.uniform(20.0, 35.0)
+                            if self.use_proxies and len(self.proxy_list) > 1:
+                                wait_seconds = random.uniform(6.0, 12.0)
+                            else:
+                                wait_seconds = random.uniform(20.0, 35.0)
                             self._sleep_with_status(
                                 wait_seconds,
                                 kw,
@@ -268,7 +356,10 @@ class TrendsFetcherWorker(QThread):
                             )
                             continue
                         if attempt == 2:
-                            wait_seconds = random.uniform(45.0, 70.0)
+                            if self.use_proxies and len(self.proxy_list) > 1:
+                                wait_seconds = random.uniform(12.0, 20.0)
+                            else:
+                                wait_seconds = random.uniform(45.0, 70.0)
                             self._sleep_with_status(
                                 wait_seconds,
                                 kw,
@@ -283,6 +374,26 @@ class TrendsFetcherWorker(QThread):
 
                     self.status_signal.emit(f"Error fetching '{kw}': {err_text}. Skipping keyword.")
                     break
+
+            if (
+                self.is_running
+                and self.enable_pause_after_connections
+                and self.pause_after_connections > 0
+                and self.total_requests_made > 0
+                and self.total_requests_made % self.pause_after_connections == 0
+                and keyword_index < total_keywords
+            ):
+                scheduled_pause = random.uniform(
+                    max(0.0, float(self.pause_min_seconds)),
+                    max(float(self.pause_min_seconds), float(self.pause_max_seconds)),
+                )
+                self._sleep_with_status(
+                    scheduled_pause,
+                    kw,
+                    keyword_index,
+                    total_keywords,
+                    suffix="(scheduled pause)",
+                )
 
             if self.is_running and keyword_index < total_keywords:
                 inter_delay = self._next_inter_keyword_delay(keyword_index)

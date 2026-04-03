@@ -203,6 +203,11 @@ Tai lieu chi tiet rieng cho tab Videos nam o: `stepvideotab.md`.
   1) UI,
   2) Logic,
   3) Test.
+- Quy tac phoi hop (cap nhat 2026-04-03):
+  - Lam UI truoc.
+  - Xong UI phai dung lai, bao user review/xac nhan.
+  - Chi lam backend sau khi user dong y qua step backend.
+  - Chi duoc gop UI+backend trong 1 step khi user yeu cau ro rang hoac feature khong the tach.
 - Xong step hien tai moi goi y step tiep theo.
 - Neu can anh UI bo sung, yeu cau user gui them ngay trong step do.
 

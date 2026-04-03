@@ -73,6 +73,10 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 - Nen trang -> chu den.
 - Link giu mau xanh.
 - Moi step lam theo thu tu: `UI -> Logic -> Test`.
+- Quy tac phoi hop (cap nhat 2026-04-03):
+  - Sau khi xong phan UI cua step, phai dung va cho user xac nhan.
+  - Khong tu dong lam tiep backend neu chua co xac nhan.
+  - Chi gop UI+backend trong mot lan neu user yeu cau ro rang.
 - Khong nhay buoc, khong gom nhieu feature lon trong 1 step.
 - Xong step phai cap nhat tai lieu nay ngay.
 
@@ -192,62 +196,92 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 - SCR:
   - cot Image truoc/sau khi load xong.
 
-### SV-05 - Search options mapping that
+### SV-05 - Search options mapping that (done)
 - UI:
   - Sort, subtitles, creative commons, page count.
 - Logic:
-  - map option vao request/loc ket qua.
+  - map option vao worker search:
+    - `Sort`: Relevance / Upload date / View count (Rating fallback ve Relevance do du lieu rating khong on dinh tren YouTube search hien tai).
+    - `Contains subtitles`: loc theo thong tin caption tracks tren watch page.
+    - `Creative Commons License`: loc theo license text tren watch page.
+    - `Pages`: quy doi `max_results` (1 page ~ 20 rows), kem `first_page_only` scan limit.
 - Test:
-  - doi sort -> thu tu ket qua doi.
-  - subtitles/license filter co tac dung.
+  - doi sort -> thu tu ket qua thay doi (upload date/view count).
+  - subtitles/license filter co tac dung (co the cham hon do can check watch page).
 - SCR:
   - tung option bat/tat.
 
-### SV-05A - Trending Videos button backend
+### SV-05A - Trending Videos button backend (done)
 - UI:
   - nut `Trending Videos` khong con placeholder.
+  - them `Trending region` combo (co ban).
 - Logic:
-  - fetch danh sach trending theo region co ban.
+  - worker rieng `TrendingVideosWorker` fetch tu `/feed/trending`.
+  - do row realtime vao table + dung `Stop` chung.
+  - ho tro region code co ban (US, VN, GB, IN, JP, KR, BR, DE, FR).
 - Test:
   - bam nut -> co data vao table.
 - SCR:
   - before/after click Trending Videos.
 
-### SV-06 - Table context menu (Videos)
+### SV-06 - Table context menu (Videos) (done)
 - UI:
   - right-click menu day du.
 - Logic:
-  - copy selected/all, delete selected, open link.
+  - `Open Video Link` cho row dang click.
+  - `Copy` submenu:
+    - copy selected rows (uu tien checkbox, fallback row highlight)
+    - copy all rows
+    - copy selected/all video links
+  - delete selected rows + delete all rows (co confirm).
 - Test:
   - selected theo checkbox hoat dong dung.
 - SCR:
   - menu + ket qua copy/delete.
 
-### SV-07 - Filter dialog (Videos)
+### SV-07 - Filter dialog (Videos) (done)
 - UI:
   - popup filter theo source/text/range.
 - Logic:
-  - apply/reset filter.
+  - popup `Filter Videos` voi cac truong:
+    - Source
+    - Search Phrase contains
+    - Title contains
+    - Description contains
+  - apply filter dua tren cache row goc (khong mat du lieu).
+  - reset filter (dialog reset + menu context `Reset Filters`).
+  - button `Filters` o day mo dialog that.
 - Test:
   - filter on/off dung so luong row.
 - SCR:
   - dialog + truoc/sau filter.
 
-### SV-08 - Search trong table
+### SV-08 - Search trong table (done)
 - UI:
-  - popup quick search.
+  - popup `Search In Table`:
+    - input keyword
+    - buttons `Find`, `Prev`, `Next`, `Close`
+  - context menu:
+    - `Search...`
+    - `Clear Search Highlight`
 - Logic:
-  - highlight va next/prev match.
+  - tim tren cac cot data (Video ID -> Description).
+  - highlight cell match mau vang.
+  - next/prev de nhay qua tung ket qua.
 - Test:
   - tim title/description keyword.
 - SCR:
   - highlight ket qua.
 
-### SV-09 - Auto-fit + Reset columns
+### SV-09 - Auto-fit + Reset columns (done)
 - UI:
   - menu item va nut neu can.
 - Logic:
-  - auto-fit all, reset default widths.
+  - right-click menu co:
+    - `Auto-fit column widths`
+    - `Reset column widths`
+  - auto-fit: resize theo noi dung hien tai.
+  - reset: quay ve mode/width mac dinh cua table.
 - Test:
   - width doi dung va reset dung.
 - SCR:
@@ -330,17 +364,24 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 
 ## Pha D - Analyze mode
 
-### SV-16 - Analyze panel UI
+### SV-16 - Analyze panel UI (done)
 - UI:
-  - cards thong ke co ban.
+  - popup `Videos Analyze` khi bam nut Analyze.
+  - cards thong ke:
+    - Total Videos
+    - Avg Title Length
+    - Missing Description
+  - 2 box chi tiet:
+    - Source Ratio
+    - Top Repeated Terms (Title)
 - Logic:
-  - tinh tren dataset hien tai.
+  - tinh tren dataset hien thi hien tai trong table.
 - Test:
   - thay doi data -> chi so doi.
 - SCR:
   - panel analyze full.
 
-### SV-17 - Analyze metrics backend
+### SV-17 - Analyze metrics backend (done)
 - Chi so goi y:
   - avg title length,
   - top repeated terms,

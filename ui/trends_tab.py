@@ -1,6 +1,7 @@
 import webbrowser
 import sys
 import random
+import re
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
@@ -34,6 +35,12 @@ from PyQt6.QtWidgets import (
 
 from core.trends_fetcher import TrendsFetcherWorker
 from utils.constants import CAT_MAP, COUNTRY_LIST, GEO_MAP, TIME_MAP
+from utils.proxy_utils import parse_proxy_lines
+
+try:
+    import requests
+except ImportError:  # pragma: no cover
+    requests = None
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -347,7 +354,7 @@ class TrendsSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Trends Tool Settings")
         self.setModal(True)
-        self.resize(560, 310)
+        self.resize(620, 360)
         self.setStyleSheet(
             """
             QDialog { background-color: #1c1c1c; color: #f2f2f2; }
@@ -385,6 +392,9 @@ class TrendsSettingsDialog(QDialog):
         root.setSpacing(14)
 
         row1 = QHBoxLayout()
+        self.chk_pause_after_connections = QCheckBox("")
+        self.chk_pause_after_connections.setChecked(bool(self._settings.get("enable_pause_after_connections", True)))
+        row1.addWidget(self.chk_pause_after_connections)
         row1.addWidget(QLabel("After"))
         self.spin_pause_after = QSpinBox()
         self.spin_pause_after.setRange(1, 10000)
@@ -395,7 +405,7 @@ class TrendsSettingsDialog(QDialog):
         self.spin_pause_min.setRange(0, 3600)
         self.spin_pause_min.setValue(int(self._settings.get("pause_min_seconds", 10)))
         row1.addWidget(self.spin_pause_min)
-        row1.addWidget(QLabel("to"))
+        row1.addWidget(QLabel("seconds to"))
         self.spin_pause_max = QSpinBox()
         self.spin_pause_max.setRange(0, 3600)
         self.spin_pause_max.setValue(int(self._settings.get("pause_max_seconds", 60)))
@@ -405,13 +415,29 @@ class TrendsSettingsDialog(QDialog):
         root.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Maximum concurrent workers"))
+        self.chk_max_consecutive_proxy = QCheckBox("")
+        self.chk_max_consecutive_proxy.setChecked(
+            bool(self._settings.get("enable_max_consecutive_proxy_connections", True))
+        )
+        row2.addWidget(self.chk_max_consecutive_proxy)
+        row2.addWidget(QLabel("Max consecutive web connections per proxy:"))
+        self.spin_consecutive_proxy = QSpinBox()
+        self.spin_consecutive_proxy.setRange(1, 10000)
+        self.spin_consecutive_proxy.setValue(
+            int(self._settings.get("max_consecutive_web_connections_per_proxy", 50))
+        )
+        row2.addWidget(self.spin_consecutive_proxy)
+        row2.addStretch()
+        root.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Maximum concurrent workers"))
         self.spin_workers = QSpinBox()
         self.spin_workers.setRange(1, 2)
         self.spin_workers.setValue(min(2, int(self._settings.get("max_workers", 2))))
-        row2.addWidget(self.spin_workers)
-        row2.addStretch()
-        root.addLayout(row2)
+        row3.addWidget(self.spin_workers)
+        row3.addStretch()
+        root.addLayout(row3)
 
         self.chk_auto_sort = QCheckBox("Auto sort table by Total Average after finishing")
         self.chk_auto_sort.setChecked(bool(self._settings.get("auto_sort_total_average", True)))
@@ -445,10 +471,13 @@ class TrendsSettingsDialog(QDialog):
             pause_min, pause_max = pause_max, pause_min
 
         return {
+            "enable_pause_after_connections": bool(self.chk_pause_after_connections.isChecked()),
             "pause_after_connections": int(self.spin_pause_after.value()),
             "pause_min_seconds": pause_min,
             "pause_max_seconds": pause_max,
             "max_workers": min(2, int(self.spin_workers.value())),
+            "enable_max_consecutive_proxy_connections": bool(self.chk_max_consecutive_proxy.isChecked()),
+            "max_consecutive_web_connections_per_proxy": int(self.spin_consecutive_proxy.value()),
             "auto_sort_total_average": bool(self.chk_auto_sort.isChecked()),
             "enable_embedded_browser_default": bool(self.chk_browser_default.isChecked()),
             "dark_theme_charts": bool(self.chk_dark_charts.isChecked()),
@@ -462,14 +491,23 @@ class TrendsTab(QWidget):
         self._sparkline_cache = {}
         self._worker_status_text = ""
         self.trends_settings = {
+            "enable_pause_after_connections": True,
             "pause_after_connections": 20,
             "pause_min_seconds": 10,
             "pause_max_seconds": 60,
             "max_workers": 2,
+            "enable_max_consecutive_proxy_connections": True,
+            "max_consecutive_web_connections_per_proxy": 50,
+            "max_proxies_per_run": 30,
             "auto_sort_total_average": True,
             "enable_embedded_browser_default": False,
             "dark_theme_charts": True,
         }
+        if self.main_window is not None and hasattr(self.main_window, "get_proxy_runtime_settings"):
+            runtime_proxy_settings = self.main_window.get_proxy_runtime_settings()
+            self.trends_settings["max_proxies_per_run"] = int(
+                runtime_proxy_settings.get("max_proxies_per_run", self.trends_settings["max_proxies_per_run"])
+            )
         self.browser_view = None
         self._webengine_available = False
         self.browser_panel = None
@@ -493,6 +531,14 @@ class TrendsTab(QWidget):
         self._filter_category_value = ""
         self._filter_property_value = ""
         self._filter_checked_only = False
+        self._proxy_panel_hidden = False
+        proxy_settings = (
+            self.main_window.get_proxy_settings()
+            if self.main_window is not None and hasattr(self.main_window, "get_proxy_settings")
+            else {"enabled": False, "proxies": []}
+        )
+        self._proxy_enabled = bool(proxy_settings.get("enabled", False))
+        self._proxy_list = list(proxy_settings.get("proxies", []))
         self._browser_wait_timer = QTimer(self)
         self._browser_wait_timer.setSingleShot(True)
         self._browser_wait_timer.timeout.connect(self._load_next_browser_keyword)
@@ -538,11 +584,23 @@ class TrendsTab(QWidget):
         self.btn_trends_browser.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_trends_browser.clicked.connect(self.toggle_browser_panel)
 
+        self.btn_use_proxies = QPushButton("Use Proxies")
+        self.btn_use_proxies.setCheckable(True)
+        self.btn_use_proxies.setChecked(False)
+        self.btn_use_proxies.setFixedSize(116, 28)
+        self.btn_use_proxies.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_use_proxies.setStyleSheet(
+            "QPushButton { background-color: #2b2b2b; color: #ffffff; border: 1px solid #4a4a4a; font-weight: 600; border-radius: 4px; }"
+            "QPushButton:checked { background-color: #e50914; border: none; font-weight: bold; }"
+        )
+        self.btn_use_proxies.toggled.connect(self._on_proxy_toggle_changed)
+
         top_layout.addWidget(self.btn_trends_go)
         top_layout.addWidget(self.btn_trends_stop)
         top_layout.addSpacing(140)
         top_layout.addWidget(self.btn_trends_settings)
         top_layout.addStretch()
+        top_layout.addWidget(self.btn_use_proxies)
         top_layout.addWidget(self.btn_trends_browser)
 
         layout.addWidget(top_bar)
@@ -635,17 +693,103 @@ class TrendsTab(QWidget):
         self.trends_table.cellDoubleClicked.connect(self.show_trend_chart)
 
         self.browser_panel = QFrame()
-        self.browser_panel.setMinimumWidth(0)
-        self.browser_panel.setMaximumWidth(0)
+        self.browser_panel.setStyleSheet("background-color: #12151d; border: 1px solid #2f3444; border-radius: 4px;")
+        self.browser_panel.setMinimumWidth(260)
+        self.browser_panel.setMaximumWidth(340)
         self.browser_panel_layout = QVBoxLayout(self.browser_panel)
-        self.browser_panel_layout.setContentsMargins(0, 0, 0, 0)
-        self.browser_panel_layout.setSpacing(0)
-        self.browser_placeholder = QLabel("External browser mode is enabled.")
-        self.browser_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.browser_placeholder.setStyleSheet("color: #dddddd; background-color: #1f1f1f; border: 1px solid #333333;")
-        self.browser_panel_layout.addWidget(self.browser_placeholder)
+        self.browser_panel_layout.setContentsMargins(8, 8, 8, 8)
+        self.browser_panel_layout.setSpacing(6)
+
+        proxy_top = QHBoxLayout()
+        proxy_top.setContentsMargins(0, 0, 0, 0)
+        proxy_top.setSpacing(8)
+        self.lbl_proxy_title = QLabel("Use Proxies")
+        self.lbl_proxy_title.setStyleSheet("color: #f2f5fb; font-size: 12px; font-weight: 700;")
+        proxy_top.addWidget(self.lbl_proxy_title)
+        proxy_top.addStretch()
+
+        self.btn_proxy_hide = QPushButton("Hide")
+        self.btn_proxy_hide.setFixedSize(52, 24)
+        self.btn_proxy_hide.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_proxy_hide.setStyleSheet(
+            "background-color: #e50914; color: #ffffff; border: none; border-radius: 4px; font-weight: bold;"
+        )
+        self.btn_proxy_hide.clicked.connect(self._toggle_proxy_panel_visibility)
+        proxy_top.addWidget(self.btn_proxy_hide)
+        self.browser_panel_layout.addLayout(proxy_top)
+
+        proxy_label = QLabel("Enter one proxy per line:")
+        proxy_label.setStyleSheet("color: #d4d8e2; font-size: 11px;")
+        self.browser_panel_layout.addWidget(proxy_label)
+
+        self.proxy_input = QTextEdit()
+        self.proxy_input.setPlaceholderText(
+            "190.109.121.1:9999\n"
+            "user:pass@190.109.121.1:9999\n"
+            "190.109.121.1:9999:user:pass"
+        )
+        self.proxy_input.setStyleSheet("background-color: #ffffff; color: #000000; border: 1px solid #8a8f9f; border-radius: 2px;")
+        self.proxy_input.setFixedHeight(330)
+        self.proxy_input.setPlainText("")
+        self.proxy_input.textChanged.connect(self._on_proxy_text_changed)
+        self.browser_panel_layout.addWidget(self.proxy_input, stretch=1)
+
+        self.lbl_proxy_total = QLabel("Total: 0")
+        self.lbl_proxy_total.setStyleSheet("color: #cfd4df; font-size: 11px;")
+        self.browser_panel_layout.addWidget(self.lbl_proxy_total)
+
+        proxy_btn_row = QHBoxLayout()
+        proxy_btn_row.setContentsMargins(0, 0, 0, 0)
+        proxy_btn_row.setSpacing(6)
+
+        source_label = QLabel("Source:")
+        source_label.setStyleSheet("color: #cfd4df; font-size: 11px;")
+        proxy_btn_row.addWidget(source_label)
+
+        self.combo_proxy_source = QComboBox()
+        self.combo_proxy_source.addItems([
+            "Webshare.io",
+            "ProxyScrape",
+            "GeoNode",
+            "Free Proxy List",
+        ])
+        self.combo_proxy_source.setStyleSheet(
+            "background-color: #ffffff; color: #000000; border: 1px solid #8a8f9f; border-radius: 2px; padding: 3px 6px; font-size: 11px;"
+        )
+        proxy_btn_row.addWidget(self.combo_proxy_source, stretch=1)
+        self.browser_panel_layout.addLayout(proxy_btn_row)
+
+        proxy_action_row = QHBoxLayout()
+        proxy_action_row.setContentsMargins(0, 0, 0, 0)
+        proxy_action_row.setSpacing(6)
+        self.btn_load_free_proxies = QPushButton("Load Free Proxies")
+        self.btn_load_free_proxies.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_load_free_proxies.setStyleSheet(
+            "background-color: #e50914; color: #ffffff; border: none; border-radius: 4px; font-weight: bold; padding: 5px 10px;"
+        )
+        self.btn_load_free_proxies.clicked.connect(self._load_free_proxies)
+        proxy_action_row.addWidget(self.btn_load_free_proxies)
+
+        self.btn_load_proxy_txt = QPushButton("Load TXT")
+        self.btn_load_proxy_txt.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_load_proxy_txt.setStyleSheet(
+            "background-color: #252b3a; color: #ffffff; border: 1px solid #434b60; border-radius: 4px; font-weight: 600; padding: 5px 10px;"
+        )
+        self.btn_load_proxy_txt.clicked.connect(self._load_proxies_from_txt)
+        proxy_action_row.addWidget(self.btn_load_proxy_txt)
+
+        self.btn_proxy_settings = QPushButton("Settings")
+        self.btn_proxy_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_proxy_settings.setStyleSheet(
+            "background-color: #252b3a; color: #ffffff; border: 1px solid #434b60; border-radius: 4px; font-weight: 600; padding: 5px 10px;"
+        )
+        self.btn_proxy_settings.clicked.connect(self._open_proxy_help_dialog)
+        proxy_action_row.addWidget(self.btn_proxy_settings)
+        self.browser_panel_layout.addLayout(proxy_action_row)
 
         self.browser_panel.hide()
+        self._refresh_proxy_summary()
+        self._sync_proxy_settings_to_main_window()
 
         self.trends_splitter.addWidget(left_panel)
         self.trends_splitter.addWidget(self.trends_table)
@@ -690,6 +834,263 @@ class TrendsTab(QWidget):
         self._worker_status_text = ""
         self._pending_input_keywords = []
         self._refresh_status_label()
+
+    def _collect_proxy_list_from_ui(self):
+        if not hasattr(self, "proxy_input"):
+            return list(self._proxy_list)
+        return parse_proxy_lines(self.proxy_input.toPlainText())
+
+    def _sync_proxy_settings_to_main_window(self):
+        self._proxy_list = self._collect_proxy_list_from_ui()
+        enabled = bool(getattr(self, "btn_use_proxies", None) and self.btn_use_proxies.isChecked())
+        self._proxy_enabled = enabled
+        if self.main_window is not None and hasattr(self.main_window, "set_proxy_settings"):
+            self.main_window.set_proxy_settings(enabled=enabled, proxies=self._proxy_list)
+
+    def _refresh_proxy_summary(self):
+        if not hasattr(self, "lbl_proxy_total"):
+            return
+        count = len(self._collect_proxy_list_from_ui())
+        self.lbl_proxy_total.setText(f"Total: {count}")
+
+    def _on_proxy_text_changed(self):
+        self._refresh_proxy_summary()
+        self._sync_proxy_settings_to_main_window()
+
+    def _on_proxy_toggle_changed(self, checked):
+        self._proxy_enabled = bool(checked)
+        self._set_proxy_panel_visible(bool(checked))
+        self._sync_proxy_settings_to_main_window()
+        if checked and not self._collect_proxy_list_from_ui():
+            self._show_status_message("Proxy is ON but proxy list is empty.")
+        elif checked:
+            self._show_status_message(f"Proxy enabled ({len(self._collect_proxy_list_from_ui())} entries).")
+        else:
+            self._show_status_message("Proxy disabled.")
+
+    def _set_proxy_panel_visible(self, visible):
+        if visible:
+            self.browser_panel.show()
+            total_width = max(900, self.trends_splitter.width())
+            right_width = 300
+            table_width = max(420, total_width - 260 - right_width)
+            self.trends_splitter.setSizes([260, table_width, right_width])
+            self._proxy_panel_hidden = False
+            self.btn_proxy_hide.setText("Hide")
+        else:
+            self.browser_panel.hide()
+            total_width = max(900, self.trends_splitter.width())
+            self.trends_splitter.setSizes([260, max(420, total_width - 260), 0])
+            self._proxy_panel_hidden = True
+            self.btn_proxy_hide.setText("Show")
+
+    def _toggle_proxy_panel_visibility(self):
+        if self._proxy_panel_hidden:
+            self._set_proxy_panel_visible(True)
+            if hasattr(self, "btn_use_proxies"):
+                self.btn_use_proxies.setChecked(True)
+            return
+        self._set_proxy_panel_visible(False)
+        if hasattr(self, "btn_use_proxies"):
+            self.btn_use_proxies.setChecked(False)
+
+    def _open_proxy_help_dialog(self):
+        QMessageBox.information(
+            self,
+            "Proxy Format Help",
+            "Supported formats:\n"
+            "- ip:port\n"
+            "- http://ip:port\n"
+            "- user:pass@ip:port\n"
+            "- http://user:pass@ip:port\n"
+            "- ip:port:user:pass\n"
+            "- user:pass:ip:port\n\n"
+            "Free source UI options:\n"
+            "- Webshare.io\n"
+            "- ProxyScrape\n"
+            "- GeoNode\n"
+            "- Free Proxy List",
+        )
+
+    def _load_proxies_from_txt(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Proxy TXT",
+            "",
+            "Text Files (*.txt);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+
+        text_data = ""
+        read_errors = []
+        for enc in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                with open(file_path, "r", encoding=enc) as f:
+                    text_data = f.read()
+                break
+            except Exception as exc:
+                read_errors.append(str(exc))
+                continue
+
+        if not text_data.strip():
+            QMessageBox.warning(self, "Proxy TXT", "File is empty or cannot be read.")
+            return
+
+        loaded = parse_proxy_lines(text_data)
+        if not loaded:
+            QMessageBox.warning(
+                self,
+                "Proxy TXT",
+                "No valid proxies found.\nSupported formats:\n"
+                "- ip:port\n"
+                "- user:pass@ip:port\n"
+                "- ip:port:user:pass\n"
+                "- user:pass:ip:port",
+            )
+            return
+
+        added, total = self._merge_proxy_list_into_ui(loaded)
+        self._show_status_message(f"Loaded {added} proxies from TXT. Total: {total}")
+
+    @staticmethod
+    def _dedupe_proxies(proxies):
+        output = []
+        seen = set()
+        for proxy in proxies or []:
+            text = str(proxy).strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(text)
+        return output
+
+    @staticmethod
+    def _proxy_to_display_text(proxy):
+        text = str(proxy or "").strip()
+        if not text:
+            return ""
+        if "://" in text:
+            text = text.split("://", 1)[1].strip()
+        return text
+
+    def _proxies_to_display_text(self, proxies):
+        return "\n".join(
+            self._proxy_to_display_text(p)
+            for p in (proxies or [])
+            if self._proxy_to_display_text(p)
+        )
+
+    def _merge_proxy_list_into_ui(self, new_proxies):
+        existing = self._collect_proxy_list_from_ui()
+        merged = self._dedupe_proxies(existing + list(new_proxies or []))
+        self.proxy_input.blockSignals(True)
+        self.proxy_input.setPlainText(self._proxies_to_display_text(merged))
+        self.proxy_input.blockSignals(False)
+        self._refresh_proxy_summary()
+        self._sync_proxy_settings_to_main_window()
+        added_count = max(0, len(merged) - len(existing))
+        return added_count, len(merged)
+
+    @staticmethod
+    def _http_get_text(url, timeout=20, headers=None):
+        req_headers = headers or {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, timeout=timeout, headers=req_headers)
+        response.raise_for_status()
+        return response.text
+
+    def _load_from_proxyscrape(self):
+        endpoints = [
+            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
+            "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&proxytype=http",
+        ]
+        loaded = []
+        for url in endpoints:
+            try:
+                text = self._http_get_text(url, timeout=20)
+                loaded.extend(parse_proxy_lines(text))
+            except Exception:
+                continue
+        return self._dedupe_proxies(loaded)
+
+    def _load_from_geonode(self):
+        api_url = (
+            "https://proxylist.geonode.com/api/proxy-list"
+            "?limit=200&page=1&sort_by=lastChecked&sort_type=desc"
+        )
+        payload = requests.get(
+            api_url,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        )
+        payload.raise_for_status()
+        data = payload.json() if payload.content else {}
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        loaded = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ip = str(row.get("ip", "")).strip()
+            port = str(row.get("port", "")).strip()
+            protocols = [str(x).lower() for x in row.get("protocols", []) if str(x).strip()]
+            if not ip or not port:
+                continue
+            if "http" in protocols or "https" in protocols or not protocols:
+                loaded.append(f"{ip}:{port}")
+        return self._dedupe_proxies(parse_proxy_lines("\n".join(loaded)))
+
+    def _load_from_free_proxy_list(self):
+        html = self._http_get_text("https://free-proxy-list.net/", timeout=20)
+        pattern = re.compile(r"<tr>\s*<td>(\d+\.\d+\.\d+\.\d+)</td>\s*<td>(\d+)</td>", re.IGNORECASE)
+        found = [f"{ip}:{port}" for ip, port in pattern.findall(html)]
+        return self._dedupe_proxies(parse_proxy_lines("\n".join(found)))
+
+    def _load_from_webshare(self):
+        token, ok = QInputDialog.getText(
+            self,
+            "Webshare Token",
+            "Enter your Webshare download token:",
+        )
+        if not ok or not str(token).strip():
+            return []
+
+        url = f"https://proxy.webshare.io/api/v2/proxy/list/download/{token.strip()}/-/any/sourceip/direct/-/"
+        text = self._http_get_text(url, timeout=25)
+        return self._dedupe_proxies(parse_proxy_lines(text))
+
+    def _load_free_proxies(self):
+        if requests is None:
+            QMessageBox.warning(self, "Proxy", "requests is required. Run: pip install requests")
+            return
+
+        source = self.combo_proxy_source.currentText() if hasattr(self, "combo_proxy_source") else "ProxyScrape"
+        self._show_status_message(f"Loading free proxies from {source}...")
+        QApplication.processEvents()
+
+        try:
+            if source == "Webshare.io":
+                loaded = self._load_from_webshare()
+            elif source == "ProxyScrape":
+                loaded = self._load_from_proxyscrape()
+            elif source == "GeoNode":
+                loaded = self._load_from_geonode()
+            else:
+                loaded = self._load_from_free_proxy_list()
+        except Exception as exc:
+            QMessageBox.warning(self, "Proxy", f"Failed to load proxies from {source}:\n{exc}")
+            self._show_status_message(f"Proxy load failed from {source}.")
+            return
+
+        if not loaded:
+            QMessageBox.information(self, "Proxy", f"No proxies returned from {source}.")
+            self._show_status_message(f"No proxies returned from {source}.")
+            return
+
+        added, total = self._merge_proxy_list_into_ui(loaded)
+        self._show_status_message(f"Loaded {added} new proxies from {source}. Total: {total}")
 
     def _refresh_status_label(self):
         total_text = f"Total Items: {self.trends_table.rowCount()}"
@@ -1125,6 +1526,21 @@ class TrendsTab(QWidget):
             self._sparkline_cache.clear()
             self._chart_header_checked = False
             self._update_chart_header_label()
+        self._sync_proxy_settings_to_main_window()
+        proxy_settings = (
+            self.main_window.get_proxy_settings()
+            if self.main_window is not None and hasattr(self.main_window, "get_proxy_settings")
+            else {"enabled": False, "proxies": []}
+        )
+        use_proxies = bool(proxy_settings.get("enabled", False))
+        proxy_list = list(proxy_settings.get("proxies", []))
+        max_proxies_per_run = max(1, int(self.trends_settings.get("max_proxies_per_run", 30)))
+        if proxy_list:
+            proxy_list = proxy_list[:max_proxies_per_run]
+        if use_proxies and not proxy_list:
+            QMessageBox.warning(self, "Proxy", "Proxy is enabled but the list is empty.")
+            return False
+
         self._set_worker_status("Starting trends fetch...")
         self.trends_table.setSortingEnabled(False)
         self._set_fetch_buttons_running(True)
@@ -1137,13 +1553,25 @@ class TrendsTab(QWidget):
             pause_after_connections=self.trends_settings.get("pause_after_connections", 20),
             pause_min_seconds=self.trends_settings.get("pause_min_seconds", 10),
             pause_max_seconds=self.trends_settings.get("pause_max_seconds", 60),
+            enable_pause_after_connections=self.trends_settings.get("enable_pause_after_connections", True),
             max_workers=min(2, self.trends_settings.get("max_workers", 2)),
+            use_proxies=use_proxies,
+            proxy_list=proxy_list,
+            enable_max_consecutive_proxy_connections=self.trends_settings.get(
+                "enable_max_consecutive_proxy_connections",
+                True,
+            ),
+            max_consecutive_web_connections_per_proxy=self.trends_settings.get(
+                "max_consecutive_web_connections_per_proxy",
+                50,
+            ),
         )
         self.trends_worker.progress_signal.connect(self.on_trends_progress)
         self.trends_worker.finished_signal.connect(self.on_trends_finished)
         self.trends_worker.error_signal.connect(self.on_trends_error)
         self.trends_worker.status_signal.connect(self._set_worker_status)
         self.trends_worker.start()
+        return True
 
     def _remove_processed_keyword_from_input(self, keyword):
         target = str(keyword).strip()
@@ -1182,10 +1610,13 @@ class TrendsTab(QWidget):
         self.trends_input.blockSignals(False)
 
         # Always prioritize in-app data fetch so table can fill in real time.
+        started = True
         if self._run_pytrends_with_external_browser:
-            self._start_pytrends_fetch(keywords, clear_table=True)
+            started = self._start_pytrends_fetch(keywords, clear_table=True)
         else:
             self._set_fetch_buttons_running(True)
+        if not started:
+            return
 
         # Optional external browser sequence (disabled by default to avoid UI focus jumps).
         if self._open_external_browser_sequence:
@@ -1909,3 +2340,7 @@ class TrendsTab(QWidget):
         dialog = TrendsSettingsDialog(self.trends_settings, self)
         if dialog.exec():
             self.trends_settings = dialog.get_settings()
+            if self.main_window is not None and hasattr(self.main_window, "set_proxy_runtime_settings"):
+                self.main_window.set_proxy_runtime_settings(
+                    max_proxies_per_run=int(self.trends_settings.get("max_proxies_per_run", 30))
+                )
