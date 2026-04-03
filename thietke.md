@@ -54,13 +54,18 @@ Tai lieu nay gom cac diem da phan tich va roadmap chi tiet de code tung buoc, tr
   - nen trang chu den,
   - link mau xanh.
 
-## V3 - Search mode: lay danh sach video co ban (P1)
+## V3 - Search mode: lay danh sach video co ban (P1) (done)
 - UI:
   - nut Search su dung du lieu tu `Search Phrase`,
   - status message ro rang.
 - Logic:
   - tim kiem YouTube theo tu khoa,
   - do du lieu vao bang ngay khi co ket qua.
+- Da implement:
+  - chay thread nen (UI khong bi dung),
+  - them row realtime vao table,
+  - co nut Stop de dung qua trinh,
+  - cap nhat Total Items/Selected rows ngay khi co row moi.
 - Cot du lieu toi thieu:
   - checkbox, image placeholder, video id, video link, source, search phrase, title, description.
 - Kiem thu:
@@ -160,4 +165,3 @@ Tai lieu nay gom cac diem da phan tich va roadmap chi tiet de code tung buoc, tr
 - Context menu du backend chinh.
 - Filter/Search/Auto-fit/Export dung.
 - UI dong bo va de dung giong huong Tube Atlas.
-

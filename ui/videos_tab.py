@@ -19,6 +19,9 @@ from PyQt6.QtWidgets import (
     QWidget,
     QHeaderView,
 )
+import webbrowser
+
+from core.videos_fetcher import VideoSearchWorker
 
 
 class VideosTab(QWidget):
@@ -27,6 +30,7 @@ class VideosTab(QWidget):
         self.main_window = main_window
         self._mode = "search"
         self._checkbox_syncing = False
+        self._search_worker = None
         self._dark_label_style = "QLabel { color: #f3f4f6; }"
         self._light_input_style = (
             "QLineEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:5px 8px; }"
@@ -132,11 +136,26 @@ class VideosTab(QWidget):
         self.btn_search = QPushButton("Search")
         self.btn_search.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_search.setStyleSheet(self._red_button_style)
-        self.btn_search.clicked.connect(lambda: self._show_coming_soon("Search"))
+        self.btn_search.clicked.connect(self.start_search)
+
+        self.btn_stop_search = QPushButton("Stop")
+        self.btn_stop_search.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_stop_search.setEnabled(False)
+        self.btn_stop_search.setStyleSheet(
+            "QPushButton { background-color:#3c4253; color:#ffffff; border:none; border-radius:4px; padding:6px 12px; font-weight:700; }"
+            "QPushButton:hover { background-color:#4a5166; }"
+            "QPushButton:disabled { background-color:#2a2e3b; color:#8d92a3; }"
+        )
+        self.btn_stop_search.clicked.connect(self.stop_search)
 
         v.addWidget(QLabel("Search Phrase:"))
         v.addWidget(self.input_search_phrase)
-        v.addWidget(self.btn_search)
+        search_btn_row = QHBoxLayout()
+        search_btn_row.setContentsMargins(0, 0, 0, 0)
+        search_btn_row.setSpacing(8)
+        search_btn_row.addWidget(self.btn_search)
+        search_btn_row.addWidget(self.btn_stop_search)
+        v.addLayout(search_btn_row)
 
         self.chk_youtube_first = QCheckBox("Youtube (first page results only)")
         self.chk_youtube_first.setChecked(True)
@@ -253,6 +272,7 @@ class VideosTab(QWidget):
         self.videos_table.verticalHeader().setVisible(False)
         self.videos_table.verticalHeader().setDefaultSectionSize(30)
         self.videos_table.itemChanged.connect(self._on_table_item_changed)
+        self.videos_table.cellDoubleClicked.connect(self._on_table_cell_double_clicked)
         self.videos_table.setStyleSheet(
             "QTableWidget { background-color:#ffffff; color:#111111; gridline-color:#dddddd; border:1px solid #cfcfcf; }"
             "QHeaderView::section { background-color:#f0f0f0; color:#111111; border:1px solid #d0d0d0; font-weight:700; padding:4px; }"
@@ -262,20 +282,21 @@ class VideosTab(QWidget):
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
 
-        self.videos_table.setColumnWidth(0, 28)
-        self.videos_table.setColumnWidth(1, 42)
-        self.videos_table.setColumnWidth(2, 90)
-        self.videos_table.setColumnWidth(3, 170)
-        self.videos_table.setColumnWidth(4, 80)
-        self.videos_table.setColumnWidth(5, 110)
-        self.videos_table.setColumnWidth(6, 180)
+        self.videos_table.setColumnWidth(0, 26)
+        self.videos_table.setColumnWidth(1, 58)
+        self.videos_table.setColumnWidth(2, 100)
+        self.videos_table.setColumnWidth(3, 210)
+        self.videos_table.setColumnWidth(4, 76)
+        self.videos_table.setColumnWidth(5, 120)
+        self.videos_table.setColumnWidth(6, 250)
+        self.videos_table.setColumnWidth(7, 320)
 
         v.addWidget(self.videos_table, stretch=1)
 
@@ -301,8 +322,10 @@ class VideosTab(QWidget):
         bottom.setSpacing(8)
 
         self.lbl_total_items = QLabel("Total Items: 0")
+        self.lbl_status = QLabel("Ready.")
         self.lbl_selected_rows = QLabel("Selected rows: 0")
         self.lbl_total_items.setStyleSheet("color:#ffffff; font-weight:700;")
+        self.lbl_status.setStyleSheet("color:#c9ccd6; font-weight:600;")
         self.lbl_selected_rows.setStyleSheet("color:#c9ccd6; font-weight:600;")
 
         self.btn_file = QPushButton("File")
@@ -316,6 +339,8 @@ class VideosTab(QWidget):
         self.btn_clear.clicked.connect(self._clear_table_ui_only)
 
         bottom.addWidget(self.lbl_total_items)
+        bottom.addStretch()
+        bottom.addWidget(self.lbl_status)
         bottom.addStretch()
         bottom.addWidget(self.lbl_selected_rows)
         bottom.addStretch()
@@ -366,6 +391,125 @@ class VideosTab(QWidget):
     def _clear_table_ui_only(self):
         self.videos_table.setRowCount(0)
         self._update_status_labels()
+
+    def _set_status(self, message):
+        self.lbl_status.setText(message)
+        if self.main_window is not None:
+            self.main_window.statusBar().showMessage(message, 5000)
+
+    def _set_search_running(self, running):
+        self.btn_search.setEnabled(not running)
+        self.btn_stop_search.setEnabled(running)
+
+    def start_search(self):
+        query = self.input_search_phrase.text().strip()
+        if not query:
+            QMessageBox.warning(self, "Videos Tool", "Please enter a search phrase first.")
+            return
+
+        if self._search_worker is not None and self._search_worker.isRunning():
+            QMessageBox.information(self, "Videos Tool", "Search is already running.")
+            return
+
+        if not self.chk_youtube_first.isChecked():
+            QMessageBox.information(
+                self,
+                "Videos Tool",
+                "Step V3 currently uses YouTube source. Advanced multi-source will be added in the next step.",
+            )
+
+        target_pages = int(self.combo_pages.currentText() or "1")
+        max_results = max(5, min(100, target_pages * 20))
+        if self.chk_youtube_first.isChecked():
+            max_results = min(max_results, 20)
+
+        self._clear_table_ui_only()
+        self._set_search_running(True)
+        self._set_status(f"Searching '{query}'...")
+
+        self._search_worker = VideoSearchWorker(query=query, max_results=max_results)
+        self._search_worker.video_signal.connect(self._append_video_row)
+        self._search_worker.status_signal.connect(self._set_status)
+        self._search_worker.error_signal.connect(self._on_search_error)
+        self._search_worker.finished_signal.connect(self._on_search_finished)
+        self._search_worker.start()
+
+    def stop_search(self):
+        if self._search_worker is not None and self._search_worker.isRunning():
+            self._search_worker.stop()
+            self._set_status("Stopping search...")
+
+    def _on_search_error(self, error_text):
+        QMessageBox.warning(self, "Videos Tool", error_text)
+
+    def _on_search_finished(self, result):
+        self._set_search_running(False)
+        count = int((result or {}).get("count", 0))
+        if count > 0:
+            self._set_status(f"Done. Loaded {count} videos.")
+        else:
+            self._set_status("Search finished.")
+        self._search_worker = None
+
+    def _append_video_row(self, video):
+        row = self.videos_table.rowCount()
+        self.videos_table.insertRow(row)
+
+        checkbox_item = QTableWidgetItem("")
+        checkbox_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+        self.videos_table.setItem(row, 0, checkbox_item)
+
+        thumb_item = QTableWidgetItem("N/A")
+        thumb_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        thumb_item.setForeground(QColor("#666666"))
+        self.videos_table.setItem(row, 1, thumb_item)
+
+        values = [
+            video.get("Video ID", ""),
+            video.get("Video Link", ""),
+            video.get("Source", "YouTube"),
+            video.get("Search Phrase", ""),
+            video.get("Title", ""),
+            video.get("Description", ""),
+        ]
+
+        for col_offset, text in enumerate(values, start=2):
+            item = QTableWidgetItem(str(text))
+            if col_offset in (2, 4):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            else:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+
+            if col_offset == 3:
+                # Keep valid full URL and show as link-like text in the table.
+                link_text = str(text).strip()
+                if link_text.startswith("www.youtube.com/"):
+                    link_text = f"https://{link_text}"
+                if link_text and "youtube.com/watch?v=" not in link_text:
+                    video_id = str(video.get("Video ID", "")).strip()
+                    if video_id:
+                        link_text = f"https://www.youtube.com/watch?v={video_id}"
+                        item.setText(link_text)
+                if link_text.startswith("http://") or link_text.startswith("https://"):
+                    item.setForeground(QColor("#1a73e8"))
+                    item.setToolTip(link_text)
+            elif col_offset in (6, 7):
+                item.setToolTip(str(text))
+            self.videos_table.setItem(row, col_offset, item)
+
+        self.videos_table.scrollToBottom()
+        self._update_status_labels()
+
+    def _on_table_cell_double_clicked(self, row, column):
+        if column != 3:
+            return
+        item = self.videos_table.item(row, column)
+        if item is None:
+            return
+        link = item.text().strip()
+        if link.startswith("http://") or link.startswith("https://"):
+            webbrowser.open_new_tab(link)
 
     def _show_coming_soon(self, feature_name):
         QMessageBox.information(self, "Videos Tool", f"{feature_name} will be implemented in the next step.")
