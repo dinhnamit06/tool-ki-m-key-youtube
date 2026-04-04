@@ -354,7 +354,8 @@ class VideoMetadataEnrichWorker(QThread):
                     return
                 try:
                     video_id, title, details = future.result()
-                    self.status_signal.emit(f"Enriched metadata {idx}/{total}: {title}")
+                    if idx == 1 or idx == total or idx % 3 == 0:
+                        self.status_signal.emit(f"Enriched metadata {idx}/{total}: {title}")
                     if details:
                         self.row_enriched_signal.emit(video_id, details)
                         updated += 1
@@ -958,7 +959,8 @@ class VideoSearchWorker(QThread):
                 if not self._running:
                     break
                 self.video_signal.emit(video)
-                self.status_signal.emit(f"Loaded {idx}/{total} videos for '{self.query}'...")
+                if idx == 1 or idx == total or idx % 5 == 0:
+                    self.status_signal.emit(f"Loaded {idx}/{total} videos for '{self.query}'...")
 
             if self._running:
                 self.status_signal.emit(f"Done. Loaded {total} videos.")
@@ -1055,7 +1057,8 @@ class ImportedLinksMetadataWorker(QThread):
                 break
 
             video_link = str(base_row.get("Video Link", "")).strip()
-            self.status_signal.emit(f"Fetching metadata ({idx}/{total})...")
+            if idx == 1 or idx == total or idx % 4 == 0:
+                self.status_signal.emit(f"Fetching metadata ({idx}/{total})...")
 
             row = dict(base_row)
             meta, err_text = self._fetch_oembed_with_retry(video_link, idx, total)
@@ -1372,7 +1375,8 @@ class TrendingVideosWorker(QThread):
                 if not self._running:
                     break
                 self.video_signal.emit(video)
-                self.status_signal.emit(f"Loaded trending {idx}/{total} (region={self.region_code})...")
+                if idx == 1 or idx == total or idx % 5 == 0:
+                    self.status_signal.emit(f"Loaded trending {idx}/{total} (region={self.region_code})...")
 
             if self._running:
                 self.status_signal.emit(f"Done. Loaded {total} trending videos.")

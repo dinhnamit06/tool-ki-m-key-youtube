@@ -5,6 +5,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect
 from PyQt6.QtGui import QFont, QColor, QBrush, QAction
+import json
+import re
 
 from utils.constants import REQUESTS_INSTALLED
 from core.keyword_generator import generate_keywords_api
@@ -327,29 +329,15 @@ class KeywordsTab(QWidget):
         self.generate_btn.setEnabled(False)
         QApplication.processEvents()
         
-        prompt = f"""You are an expert YouTube keyword researcher.
-Given the seed keyword: "{seed_text}"
-Generate exactly {target_count} high-quality, natural long-tail keywords for YouTube videos.
-Important rules:
-- Each keyword must be short and concise: maximum 5 words.
-- Focus on trending, searchable YouTube video topics and sub-niches.
-- TARGET GEOGRAPHY: {target_country}.
-"""
-        if target_country != "Worldwide":
-            prompt += f"- NATIVE LANGUAGE: Keywords MUST be written natively in the primary language of {target_country}.\n"
-            prompt += f"- CULTURAL TRENDS: Adapt the niche realistically to the current localized YouTube trends in {target_country}.\n"
-        
-        if self.toggle_bilingual.isChecked():
-            prompt += "- BILINGUAL OUTPUT: Include the native language AND the English translation separated by a dash.\n"
-            
-        prompt += f"""- Avoid long sentences or keywords longer than 5 words.
-- Support wildcard * if present.
-- Return ONLY a clean comma-separated list of exactly {target_count} keywords. No numbers, no explanations, no extra text.
-Seed keyword: {seed_text}
-"""
+        prompt = self._build_keyword_generation_prompt(
+            seed_text=seed_text,
+            target_country=target_country,
+            target_count=target_count,
+            bilingual=self.toggle_bilingual.isChecked(),
+        )
         try:
             content = generate_keywords_api(prompt, provider=provider, model_name=model_name)
-            generated_list = [kw.strip() for kw in content.split(",") if kw.strip()]
+            generated_list = self._parse_generated_keywords(content, target_count)
         except Exception as e:
             QMessageBox.critical(self, "API Error", str(e))
             generated_list = []
@@ -374,6 +362,185 @@ Seed keyword: {seed_text}
                 rank += 1
             
         self.populate_table(results)
+
+    def _build_keyword_generation_prompt(self, seed_text, target_country, target_count, bilingual=False):
+        seed_scope = self._classify_seed_scope(seed_text)
+        native_rules = ""
+        if target_country != "Worldwide":
+            native_rules = (
+                f"- Geography focus: {target_country}.\n"
+                f"- Use the natural primary language spoken by YouTube viewers in {target_country}.\n"
+                f"- Reflect realistic local search behavior, local slang if appropriate, and localized content angles.\n"
+            )
+        else:
+            native_rules = (
+                "- Geography focus: Worldwide.\n"
+                "- Prefer globally understandable, broad-market YouTube search phrasing.\n"
+            )
+
+        bilingual_rule = ""
+        if bilingual:
+            bilingual_rule = (
+                "- Bilingual mode: output each keyword as `native language keyword - English translation`.\n"
+            )
+
+        if seed_scope == "broad":
+            scope_rules = (
+                "- The seed keyword is BROAD.\n"
+                "- Return broader, stronger, higher-demand YouTube search terms inside this topic.\n"
+                "- Stay at the main opportunity layer first.\n"
+                "- Do NOT go too deep into tiny sub-niches too early.\n"
+                "- Prefer scalable terms that can support many videos and larger search demand.\n"
+                "- Example behavior: if the seed is `health`, outputs should look closer to `cramp`, `sick`, `lose weight`, `sleep`, `anxiety`, not ultra-specific micro-angles.\n"
+            )
+        else:
+            scope_rules = (
+                "- The seed keyword is already SPECIFIC.\n"
+                "- You should expand into sub-niches, subtopics, and more detailed search opportunities inside this topic.\n"
+                "- It is acceptable to go more specific because the seed is already narrow enough.\n"
+            )
+
+        return f"""You are a senior YouTube niche research strategist and keyword discovery expert.
+ 
+ Your task is to generate up to {target_count} high-opportunity YouTube keyword ideas from the seed keyword below.
+ 
+Seed keyword: "{seed_text}"
+
+Strategy requirements:
+- Focus on YouTube search intent, not blog SEO or generic topic brainstorming.
+- Prefer keywords that suggest specific sub-niches, repeatable video series, clear audience intent, and practical monetization potential.
+  - Favor ideas that can work for solo creators, faceless channels, Shorts, long-form, or both.
+  - Avoid broad, generic, saturated, or vague keywords unless they are sharply narrowed.
+  - Avoid filler variations that are only tiny wording changes.
+  - Do NOT reject a keyword just because it is unusually short, niche, weird, or non-obvious.
+  - If a short or uncommon keyword has strong YouTube performance potential, include it.
+  - Some strong opportunities may be single-word or two-word terms. That is acceptable if the opportunity is real.
+  {scope_rules}
+  - Prefer keywords with stronger opportunity through one or more of these:
+    - clearer audience
+    - lower competition angle
+    - better repeatable series potential
+    - stronger search intent
+    - easier production workflow
+    - stronger monetization fit
+  - Include a strong mix of keyword types when relevant:
+    - raw short terms
+    - symptom or problem-first terms
+    - condition or topic terms
+    - solution-seeking terms
+    - long-tail search terms
+    - series-friendly sub-niche terms
+  - Especially for niches like health, finance, beauty, fitness, education, and software:
+    - actively include short high-intent search terms if they have real performance potential
+    - include pain-point words, symptom words, condition words, or problem words
+    - do not over-convert everything into long-tail phrases
+  - Think silently about:
+    - searchability
+    - niche specificity
+    - series potential
+    - faceless suitability
+  - monetization potential
+  - content repeatability
+  - competition weakness
+
+  Formatting rules:
+  - Each keyword must be natural and human-searchable.
+  - Prefer concise keywords, but allow longer keywords when they are more realistic or higher-opportunity.
+  - Do not force unnatural phrasing just to keep the keyword short.
+  - Some outputs should be very short when appropriate, including single-word and two-word terms.
+  - If the seed keyword is broad, include some sharp high-signal short keywords related to the niche.
+  - Do not output sentences, explanations, categories, bullet points, numbering, or commentary.
+- Support wildcard * naturally if the seed keyword uses it.
+{native_rules}{bilingual_rule}
+Output rules:
+  - Return ONLY a clean comma-separated list.
+  - Return the best ideas first.
+  - Return no more than {target_count} items.
+- No numbering.
+- No headers.
+  - No quotation marks.
+  - No markdown.
+  - No extra notes.
+  """
+
+    def _classify_seed_scope(self, seed_text):
+        text = " ".join(str(seed_text or "").strip().lower().split())
+        if not text:
+            return "broad"
+
+        specific_terms = {
+            "cramp", "migraine", "anxiety", "bloating", "fatigue", "insomnia", "acid reflux",
+            "constipation", "vertigo", "eczema", "psoriasis", "pcos", "adhd", "autism",
+            "ibs", "scoliosis", "tinnitus", "sciatica",
+        }
+        broad_terms = {
+            "health", "fitness", "beauty", "finance", "money", "business", "productivity",
+            "gaming", "education", "sleep", "weight loss", "travel", "food", "diet",
+            "software", "ai", "motivation", "study", "english", "workout", "skin care",
+        }
+        if text in specific_terms:
+            return "specific"
+        if text in broad_terms:
+            return "broad"
+
+        word_count = len(text.split())
+        if "*" in text:
+            return "specific"
+        if word_count <= 1:
+            return "broad"
+        if word_count >= 3:
+            return "specific"
+        return "specific"
+
+    def _parse_generated_keywords(self, raw_text, target_count):
+        text = str(raw_text or "").strip()
+        if not text:
+            return []
+
+        candidates = []
+
+        # Try JSON first if the model ignored the formatting rule.
+        parsed_json = None
+        try:
+            parsed_json = json.loads(text)
+        except Exception:
+            parsed_json = None
+
+        if isinstance(parsed_json, list):
+            candidates.extend(str(item).strip() for item in parsed_json if str(item).strip())
+        elif isinstance(parsed_json, dict):
+            for key in ("keywords", "ideas", "results", "items"):
+                value = parsed_json.get(key)
+                if isinstance(value, list):
+                    candidates.extend(str(item).strip() for item in value if str(item).strip())
+                    break
+
+        if not candidates:
+            parts = re.split(r"[\n,;]+", text)
+            for part in parts:
+                item = str(part).strip()
+                if not item:
+                    continue
+                item = re.sub(r'^\s*[\-\*\u2022]+\s*', "", item)
+                item = re.sub(r"^\s*\d+[\.\)\-:]\s*", "", item)
+                item = item.strip().strip('"').strip("'").strip()
+                if item:
+                    candidates.append(item)
+
+        cleaned = []
+        seen = set()
+        for item in candidates:
+            normalized = " ".join(str(item).split()).strip()
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            cleaned.append(normalized)
+            if len(cleaned) >= int(target_count):
+                break
+        return cleaned
 
     def _setup_gemini_model_choices(self):
         options = [

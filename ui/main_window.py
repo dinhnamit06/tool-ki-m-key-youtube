@@ -1,5 +1,3 @@
-import os
-
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QStackedWidget, QSizePolicy, QTextEdit
 )
@@ -217,18 +215,6 @@ class TubeVibeApp(QMainWindow):
             "enabled": bool(enabled),
             "proxies": clean_proxies,
         }
-
-        if self.proxy_settings["enabled"] and self.proxy_settings["proxies"]:
-            first_proxy = self.proxy_settings["proxies"][0]
-            os.environ["HTTP_PROXY"] = first_proxy
-            os.environ["HTTPS_PROXY"] = first_proxy
-            os.environ["http_proxy"] = first_proxy
-            os.environ["https_proxy"] = first_proxy
-        else:
-            os.environ.pop("HTTP_PROXY", None)
-            os.environ.pop("HTTPS_PROXY", None)
-            os.environ.pop("http_proxy", None)
-            os.environ.pop("https_proxy", None)
 
     def get_proxy_runtime_settings(self):
         return {

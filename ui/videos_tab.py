@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -1403,38 +1404,119 @@ class ConfirmAddLinksDialog(QDialog):
         self.setStyleSheet("QDialog { background:#ffffff; }")
 
 
+class BookmarkDialog(QDialog):
+    def __init__(self, parent=None, initial_label="", initial_link="", folder_options=None, initial_folder=""):
+        super().__init__(parent)
+        self.setWindowTitle("Bookmark")
+        self.setModal(True)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(480)
+        self.setMinimumHeight(150)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        self.input_label = QLineEdit(str(initial_label or "").strip())
+        self.input_link = QLineEdit(str(initial_link or "").strip())
+        self.combo_folder = QComboBox()
+        self.combo_folder.addItem("")
+        for folder_name in folder_options or []:
+            text = str(folder_name or "").strip()
+            if text and self.combo_folder.findText(text) < 0:
+                self.combo_folder.addItem(text)
+        if initial_folder and self.combo_folder.findText(initial_folder) >= 0:
+            self.combo_folder.setCurrentText(initial_folder)
+
+        field_style = (
+            "QLineEdit, QComboBox { background:#ffffff; color:#111111; border:1px solid #bfc7d5; "
+            "border-radius:3px; padding:5px 8px; }"
+            "QComboBox::drop-down { border:none; width:18px; }"
+        )
+        self.input_label.setStyleSheet(field_style)
+        self.input_link.setStyleSheet(field_style)
+        self.combo_folder.setStyleSheet(field_style)
+
+        form.addRow("Bookmark Label:", self.input_label)
+        form.addRow("Bookmark Link:", self.input_link)
+        form.addRow("Folder (optional):", self.combo_folder)
+        root.addLayout(form)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        self.btn_create = QPushButton("Create Bookmark")
+        self.btn_close = QPushButton("Close")
+        for btn in (self.btn_create, self.btn_close):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background-color:#e24a22; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
+                "QPushButton:hover { background-color:#f05a31; }"
+            )
+        self.btn_create.clicked.connect(self.accept)
+        self.btn_close.clicked.connect(self.reject)
+        button_row.addWidget(self.btn_create)
+        button_row.addWidget(self.btn_close)
+        root.addLayout(button_row)
+
+        self.setStyleSheet(
+            "QDialog { background:#ffffff; }"
+            "QLabel { color:#111111; font-size:12px; }"
+        )
+
+    def bookmark_payload(self):
+        return {
+            "label": self.input_label.text().strip(),
+            "link": self.input_link.text().strip(),
+            "folder": self.combo_folder.currentText().strip(),
+        }
+
+
 class BrowseAndExtractDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Browse and Extract Tool")
         self.setModal(True)
-        self.resize(1180, 720)
+        self.resize(1100, 680)
         self._active_link_mode = "video"
         self._links_hidden = False
         self._video_links = []
         self._channel_links = []
+        self._bookmark_roots = {}
         self._webengine_view_class = None
         self._browser_view = None
+        self._closing = False
+        self._screen_fit_applied = False
         self._extract_scan_timer = QTimer(self)
-        self._extract_scan_timer.setInterval(1800)
+        self._extract_scan_timer.setInterval(1500)
         self._extract_scan_timer.timeout.connect(self._schedule_dom_extract)
         self._autoscroll_timer = QTimer(self)
-        self._autoscroll_timer.setInterval(1200)
+        self._autoscroll_timer.setInterval(900)
         self._autoscroll_timer.timeout.connect(self._autoscroll_step)
+        self._post_scroll_extract_timer = QTimer(self)
+        self._post_scroll_extract_timer.setSingleShot(True)
+        self._post_scroll_extract_timer.setInterval(650)
+        self._post_scroll_extract_timer.timeout.connect(self._schedule_dom_extract)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_left_sources_panel())
-        splitter.addWidget(self._build_center_browser_panel())
-        splitter.addWidget(self._build_right_links_panel())
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
-        splitter.setSizes([180, 760, 220])
-        root.addWidget(splitter, stretch=1)
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.addWidget(self._build_left_sources_panel())
+        self._main_splitter.addWidget(self._build_center_browser_panel())
+        self._main_splitter.addWidget(self._build_right_links_panel())
+        self._main_splitter.setStretchFactor(0, 0)
+        self._main_splitter.setStretchFactor(1, 1)
+        self._main_splitter.setStretchFactor(2, 0)
+        self._main_splitter.setSizes([170, 720, 220])
+        root.addWidget(self._main_splitter, stretch=1)
 
         bottom = QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
@@ -1483,7 +1565,38 @@ class BrowseAndExtractDialog(QDialog):
         )
         self._wire_browser_actions()
         self._refresh_link_panel()
+        QTimer.singleShot(0, self._fit_to_available_screen)
         QTimer.singleShot(0, self._initialize_live_browser)
+
+    def _fit_to_available_screen(self):
+        screen = self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        max_width = max(980, min(available.width() - 24, 1360))
+        max_height = max(620, min(available.height() - 24, 860))
+        self.resize(max_width, max_height)
+
+        center_x = available.x() + (available.width() - self.width()) // 2
+        center_y = available.y() + (available.height() - self.height()) // 2
+        self.move(max(available.x(), center_x), max(available.y(), center_y))
+
+        if hasattr(self, "_main_splitter") and self._main_splitter is not None:
+            total_width = max_width - 28
+            left_width = min(190, max(160, int(total_width * 0.14)))
+            right_width = min(280, max(210, int(total_width * 0.18)))
+            center_width = max(480, total_width - left_width - right_width)
+            self._main_splitter.setSizes([left_width, center_width, right_width])
+
+        self._screen_fit_applied = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._screen_fit_applied:
+            QTimer.singleShot(0, self._fit_to_available_screen)
 
     def _build_left_sources_panel(self):
         panel = QFrame()
@@ -1501,21 +1614,43 @@ class BrowseAndExtractDialog(QDialog):
             "QTreeWidget::item:selected { background:#9dc6f3; color:#111111; }"
         )
 
-        root_yt = QTreeWidgetItem(["YouTube"])
-        QTreeWidgetItem(root_yt, ["Trends"])
-        QTreeWidgetItem(root_yt, ["Login"])
-        root_google = QTreeWidgetItem(["Google"])
-        QTreeWidgetItem(root_google, ["Search"])
-        root_bing = QTreeWidgetItem(["Bing"])
-        QTreeWidgetItem(root_bing, ["Search"])
-        self.source_tree.addTopLevelItem(root_yt)
-        self.source_tree.addTopLevelItem(root_google)
-        self.source_tree.addTopLevelItem(root_bing)
+        root_yt = self._make_source_root("YouTube")
+        self._make_source_item(root_yt, "Trends", "https://www.youtube.com/feed/trending")
+        self._make_source_item(root_yt, "Login", "https://accounts.google.com/")
+        root_google = self._make_source_root("Google")
+        self._make_source_item(root_google, "Search", "https://www.google.com/")
+        root_bing = self._make_source_root("Bing")
+        self._make_source_item(root_bing, "Search", "https://www.bing.com/")
         self.source_tree.expandAll()
         self.source_tree.setCurrentItem(root_yt.child(0))
         self.source_tree.itemClicked.connect(self._on_source_item_clicked)
         layout.addWidget(self.source_tree, stretch=1)
         return panel
+
+    def _make_source_root(self, label):
+        name = str(label or "").strip()
+        item = QTreeWidgetItem([name])
+        item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "name": name})
+        self.source_tree.addTopLevelItem(item)
+        self._bookmark_roots[name] = item
+        return item
+
+    def _make_source_item(self, parent_item, label, url, item_type="source"):
+        label_text = str(label or "").strip()
+        url_text = str(url or "").strip()
+        item = QTreeWidgetItem([label_text])
+        item.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            {
+                "type": str(item_type or "source").strip(),
+                "label": label_text,
+                "url": url_text,
+            },
+        )
+        if parent_item is not None:
+            parent_item.addChild(item)
+        return item
 
     def _wire_browser_actions(self):
         self.input_browser_url.returnPressed.connect(self._navigate_to_input_url)
@@ -1746,12 +1881,99 @@ class BrowseAndExtractDialog(QDialog):
         if not current_url:
             return
         current_item = self.source_tree.currentItem()
-        parent_item = current_item.parent() if current_item and current_item.parent() is not None else current_item
+        current_folder = self._folder_name_for_item(current_item) or "YouTube"
+        dlg = BookmarkDialog(
+            self,
+            initial_label=self._suggest_bookmark_label(current_url),
+            initial_link=current_url,
+            folder_options=list(self._bookmark_roots.keys()),
+            initial_folder=current_folder,
+        )
+        dlg.move(self.geometry().center() - dlg.rect().center())
+        dlg.raise_()
+        dlg.activateWindow()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        payload = dlg.bookmark_payload()
+        label = str(payload.get("label", "")).strip()
+        link = self._normalize_browser_url(payload.get("link", ""))
+        folder_name = str(payload.get("folder", "")).strip() or "YouTube"
+
+        if not label:
+            QMessageBox.warning(self, "Bookmark", "Bookmark label is required.")
+            return
+        if not link:
+            QMessageBox.warning(self, "Bookmark", "Bookmark link is invalid.")
+            return
+
+        folder_item = self._bookmark_roots.get(folder_name)
+        if folder_item is None:
+            folder_item = self._make_source_root(folder_name)
+
+        existing = self._find_existing_bookmark(folder_item, label=label, link=link)
+        if existing is not None:
+            self.source_tree.setCurrentItem(existing)
+            QMessageBox.information(self, "Bookmark", "This bookmark already exists.")
+            return
+
+        bookmark_item = self._make_source_item(folder_item, label, link, item_type="bookmark")
+        folder_item.setExpanded(True)
+        self.source_tree.setCurrentItem(bookmark_item)
+        self.input_browser_url.setText(link)
+        self._set_browser_heading(label)
+
+    def _set_browser_heading(self, text):
+        value = str(text or "").strip()
+        self.lbl_browser_heading.setText(value or "Browser")
+
+    def _folder_name_for_item(self, item):
+        if item is None:
+            return ""
+        data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        if data.get("type") == "folder":
+            return str(data.get("name", "")).strip()
+        parent_item = item.parent()
         if parent_item is None:
-            parent_item = self.source_tree.topLevelItem(0)
-        bookmark_item = QTreeWidgetItem([current_url])
-        parent_item.addChild(bookmark_item)
-        parent_item.setExpanded(True)
+            return ""
+        parent_data = parent_item.data(0, Qt.ItemDataRole.UserRole) or {}
+        if parent_data.get("type") == "folder":
+            return str(parent_data.get("name", "")).strip()
+        return ""
+
+    def _suggest_bookmark_label(self, url_text):
+        url_value = str(url_text or "").strip()
+        current_heading = self.lbl_browser_heading.text().strip()
+        if current_heading and "http" not in current_heading.lower():
+            lowered = current_heading.lower()
+            if lowered not in {"youtube", "google", "bing", "browser"}:
+                return current_heading
+        parsed = urlparse(url_value)
+        path = str(parsed.path or "").strip("/")
+        if path:
+            label = path.split("/")[-1].replace("-", " ").replace("_", " ").strip()
+            if label:
+                return label.title()
+        host = parsed.netloc.replace("www.", "").strip()
+        return host or "Bookmark"
+
+    def _find_existing_bookmark(self, folder_item, label="", link=""):
+        if folder_item is None:
+            return None
+        target_label = str(label or "").strip().lower()
+        target_link = str(link or "").strip().lower()
+        for idx in range(folder_item.childCount()):
+            child = folder_item.child(idx)
+            if child is None:
+                continue
+            data = child.data(0, Qt.ItemDataRole.UserRole) or {}
+            if data.get("type") != "bookmark":
+                continue
+            child_label = str(data.get("label", child.text(0))).strip().lower()
+            child_link = str(data.get("url", "")).strip().lower()
+            if child_label == target_label or child_link == target_link:
+                return child
+        return None
 
     def _on_browser_url_changed(self, qurl):
         url_text = qurl.toString().strip()
@@ -1759,12 +1981,11 @@ class BrowseAndExtractDialog(QDialog):
             return
         self.input_browser_url.setText(url_text)
         host_text = urlparse(url_text).netloc or url_text
-        self.lbl_browser_heading.setText(host_text)
+        self._set_browser_heading(host_text)
 
     def _on_browser_load_finished(self, ok):
-        if ok and self._browser_view is not None:
+        if ok and self._browser_view is not None and not self._closing:
             self._schedule_dom_extract()
-            self._browser_view.page().toHtml(self._on_browser_html_ready)
 
     @staticmethod
     def _normalize_video_link(raw_link, base_url="https://www.youtube.com"):
@@ -1820,6 +2041,7 @@ class BrowseAndExtractDialog(QDialog):
         base_url = self.input_browser_url.text().strip() or "https://www.youtube.com"
         found_urls = set(re.findall(r'https?://[^\s"\'<>]+', html, flags=re.IGNORECASE))
         found_urls.update(re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.IGNORECASE))
+        found_urls.update(re.findall(r'src=["\']([^"\']+)["\']', html, flags=re.IGNORECASE))
 
         existing_videos = {link.lower() for link in self._video_links}
         existing_channels = {link.lower() for link in self._channel_links}
@@ -1836,11 +2058,17 @@ class BrowseAndExtractDialog(QDialog):
                 existing_channels.add(channel_link.lower())
                 new_channels.append(channel_link)
 
+        changed = False
         if new_videos:
-            self._video_links.extend(new_videos)
+            self._video_links.extend(new_videos[:500])
+            self._video_links = self._video_links[:5000]
+            changed = True
         if new_channels:
-            self._channel_links.extend(new_channels)
-        self._refresh_link_panel()
+            self._channel_links.extend(new_channels[:500])
+            self._channel_links = self._channel_links[:5000]
+            changed = True
+        if changed:
+            self._refresh_link_panel()
 
     def _on_browser_html_ready(self, html_text):
         self._extract_links_from_html(html_text)
@@ -1856,20 +2084,33 @@ class BrowseAndExtractDialog(QDialog):
         self._refresh_link_panel()
 
     def _schedule_dom_extract(self):
-        if self._browser_view is None:
+        if self._browser_view is None or self._closing or not self.isVisible():
             return
         js_code = """
             (() => {
-                const hrefs = Array.from(document.querySelectorAll('a[href]'))
-                    .map(a => a.href || a.getAttribute('href') || '')
-                    .filter(Boolean);
-                return { hrefs, url: window.location.href || '' };
+                const values = new Set();
+                const pushValue = (value) => {
+                    const text = String(value || '').trim();
+                    if (text) values.add(text);
+                };
+
+                document.querySelectorAll('a[href], a[title], ytd-thumbnail a, a#video-title').forEach((node) => {
+                    pushValue(node.href);
+                    pushValue(node.getAttribute('href'));
+                });
+
+                document.querySelectorAll('[src]').forEach((node) => {
+                    pushValue(node.getAttribute('src'));
+                });
+
+                pushValue(window.location.href || '');
+                return { hrefs: Array.from(values), url: window.location.href || '' };
             })();
         """
         self._browser_view.page().runJavaScript(js_code, self._on_dom_links_ready)
 
     def _on_dom_links_ready(self, payload):
-        if not isinstance(payload, dict):
+        if self._closing or not isinstance(payload, dict):
             return
         hrefs = payload.get("hrefs", [])
         current_url = str(payload.get("url", "")).strip()
@@ -1881,41 +2122,75 @@ class BrowseAndExtractDialog(QDialog):
     def _toggle_autoscroll(self):
         if self._autoscroll_timer.isActive():
             self._autoscroll_timer.stop()
+            self._post_scroll_extract_timer.stop()
             self.btn_autoscroll.setText("Start Autoscroll")
             return
         self._autoscroll_timer.start()
+        self._schedule_dom_extract()
         self.btn_autoscroll.setText("Stop Autoscroll")
 
     def _autoscroll_step(self):
-        if self._browser_view is None:
+        if self._browser_view is None or self._closing or not self.isVisible():
             self._autoscroll_timer.stop()
+            self._post_scroll_extract_timer.stop()
             self.btn_autoscroll.setText("Start Autoscroll")
             return
         js_code = """
             (() => {
-                const step = Math.max(400, Math.floor(window.innerHeight * 0.85));
-                window.scrollBy(0, step);
-                return { hrefs: Array.from(document.querySelectorAll('a[href]')).map(a => a.href || a.getAttribute('href') || '').filter(Boolean), url: window.location.href || '' };
+                const values = new Set();
+                const pushValue = (value) => {
+                    const text = String(value || '').trim();
+                    if (text) values.add(text);
+                };
+
+                const root = document.scrollingElement || document.documentElement || document.body;
+                const step = Math.max(520, Math.floor(window.innerHeight * 0.92));
+                if (root) {
+                    root.scrollTop = Math.min(root.scrollTop + step, root.scrollHeight);
+                } else {
+                    window.scrollBy(0, step);
+                }
+
+                document.querySelectorAll('a[href], ytd-thumbnail a, a#video-title').forEach((node) => {
+                    pushValue(node.href);
+                    pushValue(node.getAttribute('href'));
+                });
+
+                return {
+                    hrefs: Array.from(values),
+                    url: window.location.href || '',
+                    scrollTop: root ? root.scrollTop : 0,
+                    scrollHeight: root ? root.scrollHeight : 0
+                };
             })();
         """
         self._browser_view.page().runJavaScript(js_code, self._on_dom_links_ready)
+        self._post_scroll_extract_timer.start()
 
     def _on_source_item_clicked(self, item, _column):
-        text = item.text(0).strip()
-        if text == "Trends":
-            self.input_browser_url.setText("https://www.youtube.com/feed/trending")
-            self.lbl_browser_heading.setText("Trending")
-            self._navigate_to_input_url()
-        elif text == "Login":
-            self.input_browser_url.setText("https://accounts.google.com/")
-            self.lbl_browser_heading.setText("Login")
-            self._navigate_to_input_url()
-        elif text == "Search":
-            self.input_browser_url.setText("https://www.youtube.com/results?search_query=knife+making")
-            self.lbl_browser_heading.setText("Search Results")
-            self._navigate_to_input_url()
-        else:
-            self.lbl_browser_heading.setText(text or "Browser")
+        if item is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        item_type = str(data.get("type", "")).strip()
+        if item_type == "folder":
+            return
+
+        target_url = str(data.get("url", "")).strip()
+        heading_text = str(data.get("label", item.text(0))).strip() or item.text(0).strip()
+        if not target_url:
+            text = item.text(0).strip()
+            if text == "Trends":
+                target_url = "https://www.youtube.com/feed/trending"
+            elif text == "Login":
+                target_url = "https://accounts.google.com/"
+            elif text == "Search":
+                target_url = "https://www.youtube.com/results?search_query=knife+making"
+                heading_text = "Search Results"
+            else:
+                target_url = "https://www.youtube.com/"
+        self.input_browser_url.setText(target_url)
+        self._set_browser_heading(heading_text)
+        self._navigate_to_input_url()
 
     def _set_link_mode(self, mode):
         self._active_link_mode = "channel" if mode == "channel" else "video"
@@ -2009,8 +2284,15 @@ class BrowseAndExtractDialog(QDialog):
             self.accept()
 
     def closeEvent(self, event):
+        self._closing = True
         self._extract_scan_timer.stop()
         self._autoscroll_timer.stop()
+        self._post_scroll_extract_timer.stop()
+        try:
+            if self._browser_view is not None:
+                self._browser_view.stop()
+        except Exception:
+            pass
         super().closeEvent(event)
 
 
@@ -2216,8 +2498,18 @@ class VideosTab(QWidget):
         self._thumbnail_pending_rows = {}
         self._thumbnail_inflight = set()
         self._thumbnail_fallback_workers = {}
+        self._max_thumbnail_fallback_workers = 2
         self._thumbnail_manager = QNetworkAccessManager(self)
         self._thumbnail_manager.finished.connect(self._on_thumbnail_finished)
+        self._scrollbar_tune_timer = QTimer(self)
+        self._scrollbar_tune_timer.setSingleShot(True)
+        self._scrollbar_tune_timer.setInterval(80)
+        self._scrollbar_tune_timer.timeout.connect(self._tune_horizontal_scrollbar)
+        self._status_flush_timer = QTimer(self)
+        self._status_flush_timer.setSingleShot(True)
+        self._status_flush_timer.setInterval(120)
+        self._status_flush_timer.timeout.connect(self._flush_status_message)
+        self._pending_status_message = ""
         self._title_analysis_stop_words = list(DEFAULT_STOP_WORDS)
         self._dark_label_style = "QLabel { color: #f3f4f6; }"
         self._light_input_style = (
@@ -2641,7 +2933,7 @@ class VideosTab(QWidget):
         bottom.addWidget(self.btn_clear)
         v.addLayout(bottom)
         self._on_image_size_changed(self.slider_image_size.value())
-        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
+        self._defer_scrollbar_tune()
         return panel
 
     def _tune_horizontal_scrollbar(self):
@@ -2707,8 +2999,9 @@ class VideosTab(QWidget):
                 worker.finished_signal.disconnect(self._on_thumbnail_fallback_finished)
             except Exception:
                 pass
-            worker.quit()
-            worker.wait(1000)
+            if worker.isRunning():
+                worker.requestInterruption()
+                worker.wait(700)
         self._thumbnail_fallback_workers.clear()
 
     def _clear_all_video_data(self):
@@ -2719,9 +3012,23 @@ class VideosTab(QWidget):
         self._clear_table_ui_only()
 
     def _set_status(self, message):
+        self._pending_status_message = str(message or "").strip()
+        if not self._pending_status_message:
+            return
+        if not self._status_flush_timer.isActive():
+            self._status_flush_timer.start()
+
+    def _flush_status_message(self):
+        message = str(self._pending_status_message or "").strip()
+        if not message:
+            return
         self.lbl_status.setText(message)
         if self.main_window is not None:
-            self.main_window.statusBar().showMessage(message, 5000)
+            self.main_window.statusBar().showMessage(message, 4000)
+
+    def _defer_scrollbar_tune(self):
+        if not self._scrollbar_tune_timer.isActive():
+            self._scrollbar_tune_timer.start()
 
     def _set_search_running(self, running):
         download_running = self._download_worker is not None and self._download_worker.isRunning()
@@ -3115,6 +3422,13 @@ class VideosTab(QWidget):
         if not self._row_matches_filter(row_dict, self._active_filter):
             return
 
+        scrollbar = self.videos_table.verticalScrollBar()
+        keep_bottom = (
+            scrollbar is None
+            or scrollbar.maximum() <= 0
+            or scrollbar.value() >= max(0, scrollbar.maximum() - 24)
+        )
+
         row = self.videos_table.rowCount()
         self.videos_table.insertRow(row)
 
@@ -3141,8 +3455,9 @@ class VideosTab(QWidget):
         for column_name in VIDEO_TEXT_COLUMNS:
             self._set_table_text_item(row, column_name, row_dict.get(column_name, ""))
 
-        self.videos_table.scrollToBottom()
-        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
+        if keep_bottom:
+            self.videos_table.scrollToBottom()
+        self._defer_scrollbar_tune()
         self._update_status_labels()
 
     def _on_table_cell_double_clicked(self, row, column):
@@ -3257,15 +3572,17 @@ class VideosTab(QWidget):
 
     def _rebuild_table_from_cache(self):
         self._reset_table_search_state()
+        self.videos_table.setUpdatesEnabled(False)
         self.videos_table.setRowCount(0)
         self._thumbnail_pending_rows.clear()
         self._thumbnail_inflight.clear()
         for row_dict in self._all_rows_cache:
             if self._row_matches_filter(row_dict, self._active_filter):
                 self._draw_row_without_caching(row_dict)
+        self.videos_table.setUpdatesEnabled(True)
         self._update_status_labels()
         self._refresh_header_filter_tooltips()
-        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
+        self._defer_scrollbar_tune()
         self._set_status(f"Filter applied: {self.videos_table.rowCount()} / {len(self._all_rows_cache)} rows.")
 
     def open_filters_dialog(self):
@@ -3338,7 +3655,7 @@ class VideosTab(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.videos_table.setColumnWidth(0, self._default_column_widths[0])
         self.videos_table.setColumnWidth(1, self._default_column_widths[1])
-        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
+        self._defer_scrollbar_tune()
         self._set_status("Auto-fit column widths applied.")
 
     def reset_column_widths(self):
@@ -3352,7 +3669,7 @@ class VideosTab(QWidget):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         for col, width in self._default_column_widths.items():
             self.videos_table.setColumnWidth(col, width)
-        QTimer.singleShot(0, self._tune_horizontal_scrollbar)
+        self._defer_scrollbar_tune()
         self._set_status("Column widths reset.")
 
     def _reset_table_search_state(self):
@@ -4262,6 +4579,18 @@ class VideosTab(QWidget):
             return
         if req_url in self._thumbnail_fallback_workers:
             return
+        if len(self._thumbnail_fallback_workers) >= self._max_thumbnail_fallback_workers:
+            rows = self._thumbnail_pending_rows.get(req_url, [])
+            for row in rows:
+                if row < 0 or row >= self.videos_table.rowCount():
+                    continue
+                item = self.videos_table.item(row, 1)
+                if item is None:
+                    continue
+                item.setText("N/A")
+                item.setForeground(QColor("#666666"))
+            self._cleanup_thumbnail_request(req_url)
+            return
         # Keep this URL inflight while fallback worker runs, to avoid duplicate fetches.
         self._thumbnail_inflight.add(req_url)
         worker = ThumbnailFallbackWorker(req_url)
@@ -4487,4 +4816,6 @@ class VideosTab(QWidget):
         self._thumbnail_fallback_workers.clear()
         self._thumbnail_inflight.clear()
         self._thumbnail_pending_rows.clear()
+        self._scrollbar_tune_timer.stop()
+        self._status_flush_timer.stop()
         super().closeEvent(event)

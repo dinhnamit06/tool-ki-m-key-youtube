@@ -2742,3 +2742,31 @@ class TrendsTab(QWidget):
                 self.main_window.set_proxy_runtime_settings(
                     max_proxies_per_run=int(self.trends_settings.get("max_proxies_per_run", 30))
                 )
+
+    def closeEvent(self, event):
+        try:
+            self._browser_wait_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            if self._proxy_health_worker is not None and self._proxy_health_worker.isRunning():
+                self._proxy_health_worker.stop()
+                self._proxy_health_worker.wait(1200)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "trends_worker") and self.trends_worker is not None and self.trends_worker.isRunning():
+                self.trends_worker.is_running = False
+                self.trends_worker.wait(1500)
+        except Exception:
+            pass
+
+        try:
+            if self.browser_view is not None:
+                self.browser_view.stop()
+        except Exception:
+            pass
+
+        super().closeEvent(event)
