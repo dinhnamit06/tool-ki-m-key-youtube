@@ -2144,6 +2144,25 @@ class TrendsTab(QWidget):
             return
         QMessageBox.information(self, "Trends", "Sent to Channel search tool")
 
+    def _send_selected_to_keywords_tool(self):
+        keywords = self._require_selected_keywords()
+        if not keywords:
+            return
+        if self.main_window is not None and hasattr(self.main_window, "handle_send_trends_to_keywords"):
+            self.main_window.handle_send_trends_to_keywords(keywords, source_tool="Trends")
+            return
+        QMessageBox.information(self, "Trends", "Sent selected keywords to Keywords tool")
+
+    def _send_all_to_keywords_tool(self):
+        keywords = self._all_keywords()
+        if not keywords:
+            QMessageBox.warning(self, "No Data", "No keywords in the table")
+            return
+        if self.main_window is not None and hasattr(self.main_window, "handle_send_trends_to_keywords"):
+            self.main_window.handle_send_trends_to_keywords(keywords, source_tool="Trends")
+            return
+        QMessageBox.information(self, "Trends", "Sent all keywords to Keywords tool")
+
     def _get_search_volume_for_selected(self):
         keywords = self._require_selected_keywords()
         if not keywords:
@@ -2608,6 +2627,18 @@ class TrendsTab(QWidget):
             "Send to Channel search tool",
             self._send_to_channel_search_tool,
             QStyle.StandardPixmap.SP_FileDialogInfoView,
+        )
+        self._add_context_action(
+            menu,
+            "Send SELECTED to Keywords tool",
+            self._send_selected_to_keywords_tool,
+            QStyle.StandardPixmap.SP_ArrowBack,
+        )
+        self._add_context_action(
+            menu,
+            "Send ALL to Keywords tool",
+            self._send_all_to_keywords_tool,
+            QStyle.StandardPixmap.SP_ArrowLeft,
         )
         self._add_context_action(
             menu,

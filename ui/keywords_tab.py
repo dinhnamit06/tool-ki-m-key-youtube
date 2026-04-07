@@ -1,11 +1,12 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QFrame, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QHeaderView, QMessageBox, QMenu, QCheckBox, QApplication, QSpinBox
+    QHeaderView, QMessageBox, QMenu, QCheckBox, QApplication, QSpinBox, QTextEdit, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect
 from PyQt6.QtGui import QFont, QColor, QBrush, QAction
 import json
+import random
 import re
 
 from utils.constants import REQUESTS_INSTALLED
@@ -114,6 +115,27 @@ class KeywordsTab(QWidget):
         model_layout.addWidget(model_label)
         model_layout.addWidget(self.model_combo)
 
+        # --- Prompt Mode Section ---
+        prompt_mode_layout = QVBoxLayout()
+        prompt_mode_layout.setSpacing(8)
+
+        prompt_mode_label = QLabel("Prompt Mode:")
+        prompt_mode_label.setObjectName("input_label")
+        self.prompt_mode_combo = QComboBox()
+        self.prompt_mode_combo.addItems([
+            "Balanced",
+            "Broad Seed",
+            "Deep Niche",
+            "Custom",
+        ])
+        self.prompt_mode_combo.setCurrentText("Balanced")
+        self.prompt_mode_combo.setMinimumHeight(42)
+        self.prompt_mode_combo.setMinimumWidth(150)
+        self.prompt_mode_combo.setToolTip("UI only for now. Prompt behavior is unchanged.")
+
+        prompt_mode_layout.addWidget(prompt_mode_label)
+        prompt_mode_layout.addWidget(self.prompt_mode_combo)
+
         # --- Count Section ---
         count_layout = QVBoxLayout()
         count_layout.setSpacing(8)
@@ -169,16 +191,102 @@ class KeywordsTab(QWidget):
         input_grid_layout.addLayout(country_layout, 0, 1, 1, 1)
         input_grid_layout.addLayout(range_layout, 0, 2, 1, 1)
         input_grid_layout.addLayout(model_layout, 0, 3, 1, 1)
-        input_grid_layout.addLayout(count_layout, 0, 4, 1, 1)
-        input_grid_layout.addWidget(self.generate_btn, 0, 5, 1, 1, alignment=Qt.AlignmentFlag.AlignBottom)
+        input_grid_layout.addLayout(prompt_mode_layout, 0, 4, 1, 1)
+        input_grid_layout.addLayout(count_layout, 0, 5, 1, 1)
+        input_grid_layout.addWidget(self.generate_btn, 0, 6, 1, 1, alignment=Qt.AlignmentFlag.AlignBottom)
         input_grid_layout.setColumnStretch(0, 3)
         input_grid_layout.setColumnStretch(1, 2)
         input_grid_layout.setColumnStretch(2, 3)
         input_grid_layout.setColumnStretch(3, 2)
-        input_grid_layout.setColumnStretch(4, 1)
+        input_grid_layout.setColumnStretch(4, 2)
         input_grid_layout.setColumnStretch(5, 1)
+        input_grid_layout.setColumnStretch(6, 1)
         
         content_layout.addWidget(input_frame)
+
+        # --- Custom Prompt Section (UI only for now) ---
+        self.custom_prompt_frame = QFrame()
+        self.custom_prompt_frame.setObjectName("input_frame")
+        self.custom_prompt_frame.setVisible(False)
+        custom_prompt_layout = QVBoxLayout(self.custom_prompt_frame)
+        custom_prompt_layout.setContentsMargins(20, 18, 20, 18)
+        custom_prompt_layout.setSpacing(10)
+
+        custom_prompt_header = QHBoxLayout()
+        custom_prompt_label = QLabel("Custom Prompt:")
+        custom_prompt_label.setObjectName("input_label")
+        self.custom_prompt_hint = QLabel("Used only when Prompt Mode = Custom")
+        self.custom_prompt_hint.setObjectName("selection_label")
+        self.custom_prompt_hint.setStyleSheet("color: #9a9a9a; font-size: 12px;")
+        self.custom_prompt_toggle_btn = QPushButton("Hide")
+        self.custom_prompt_save_btn = QPushButton("Save Prompt")
+        self.custom_prompt_load_btn = QPushButton("Load Prompt")
+        self.custom_prompt_random_btn = QPushButton("Random Prompt")
+        self.custom_prompt_similar_btn = QPushButton("Similar Prompt")
+        self.custom_prompt_toggle_btn.setObjectName("bottom_red_btn")
+        self.custom_prompt_save_btn.setObjectName("bottom_red_btn")
+        self.custom_prompt_load_btn.setObjectName("bottom_red_btn")
+        self.custom_prompt_random_btn.setObjectName("bottom_red_btn")
+        self.custom_prompt_similar_btn.setObjectName("bottom_red_btn")
+        self.custom_prompt_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_prompt_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_prompt_load_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_prompt_random_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_prompt_similar_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_prompt_toggle_btn.setFixedHeight(30)
+        self.custom_prompt_save_btn.setFixedHeight(30)
+        self.custom_prompt_load_btn.setFixedHeight(30)
+        self.custom_prompt_random_btn.setFixedHeight(30)
+        self.custom_prompt_similar_btn.setFixedHeight(30)
+        self.custom_prompt_toggle_btn.setMinimumWidth(70)
+        self.custom_prompt_save_btn.setMinimumWidth(105)
+        self.custom_prompt_load_btn.setMinimumWidth(105)
+        self.custom_prompt_random_btn.setMinimumWidth(118)
+        self.custom_prompt_similar_btn.setMinimumWidth(112)
+        custom_prompt_header.addWidget(custom_prompt_label)
+        custom_prompt_header.addStretch()
+        custom_prompt_header.addWidget(self.custom_prompt_hint)
+        custom_prompt_header.addWidget(self.custom_prompt_random_btn)
+        custom_prompt_header.addWidget(self.custom_prompt_similar_btn)
+        custom_prompt_header.addWidget(self.custom_prompt_load_btn)
+        custom_prompt_header.addWidget(self.custom_prompt_save_btn)
+        custom_prompt_header.addWidget(self.custom_prompt_toggle_btn)
+
+        self.custom_prompt_body = QWidget()
+        custom_prompt_body_layout = QVBoxLayout(self.custom_prompt_body)
+        custom_prompt_body_layout.setContentsMargins(0, 0, 0, 0)
+        custom_prompt_body_layout.setSpacing(0)
+        self.custom_prompt_input = QTextEdit()
+        self.custom_prompt_input.setPlaceholderText(
+            "Paste your custom English prompt here. This is UI only for now; backend will be connected in the next step."
+        )
+        self.custom_prompt_input.setMinimumHeight(120)
+        self.custom_prompt_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.custom_prompt_input.setStyleSheet("""
+            QTextEdit {
+                background-color: #ffffff;
+                color: #111111;
+                border: 1px solid #444444;
+                border-radius: 5px;
+                padding: 8px;
+                selection-background-color: #e50914;
+                selection-color: #ffffff;
+            }
+        """)
+        custom_prompt_body_layout.addWidget(self.custom_prompt_input)
+
+        custom_prompt_layout.addLayout(custom_prompt_header)
+        custom_prompt_layout.addWidget(self.custom_prompt_body)
+        content_layout.addWidget(self.custom_prompt_frame)
+
+        self._custom_prompt_collapsed = False
+        self.custom_prompt_load_btn.clicked.connect(self._load_custom_prompt)
+        self.custom_prompt_random_btn.clicked.connect(self._fill_random_custom_prompt)
+        self.custom_prompt_similar_btn.clicked.connect(self._fill_similar_custom_prompt)
+        self.custom_prompt_save_btn.clicked.connect(self._save_custom_prompt)
+        self.custom_prompt_toggle_btn.clicked.connect(self._toggle_custom_prompt_body)
+        self.prompt_mode_combo.currentTextChanged.connect(self._handle_prompt_mode_ui)
+        self._handle_prompt_mode_ui(self.prompt_mode_combo.currentText())
         
         # ====================
         # DATA GRID
@@ -311,6 +419,246 @@ class KeywordsTab(QWidget):
         action_txt.triggered.connect(lambda: self.export_data("txt"))
         action_copy_all.triggered.connect(self.copy_all_keywords)
 
+    def _handle_prompt_mode_ui(self, mode_text):
+        is_custom = str(mode_text or "").strip().lower() == "custom"
+        if hasattr(self, "custom_prompt_frame"):
+            self.custom_prompt_frame.setVisible(is_custom)
+        if is_custom and hasattr(self, "custom_prompt_body"):
+            self.custom_prompt_body.setVisible(not getattr(self, "_custom_prompt_collapsed", False))
+            self.custom_prompt_toggle_btn.setText("Show" if getattr(self, "_custom_prompt_collapsed", False) else "Hide")
+
+    def _toggle_custom_prompt_body(self):
+        self._custom_prompt_collapsed = not getattr(self, "_custom_prompt_collapsed", False)
+        if hasattr(self, "custom_prompt_body"):
+            self.custom_prompt_body.setVisible(not self._custom_prompt_collapsed)
+        if hasattr(self, "custom_prompt_toggle_btn"):
+            self.custom_prompt_toggle_btn.setText("Show" if self._custom_prompt_collapsed else "Hide")
+
+    def _save_custom_prompt(self):
+        prompt_text = self._get_custom_prompt_text() if hasattr(self, "_get_custom_prompt_text") else ""
+        if not prompt_text:
+            QMessageBox.warning(self, "Empty Custom Prompt", "There is no custom prompt to save.")
+            return
+
+        default_name = "custom_prompt.txt"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Custom Prompt",
+            default_name,
+            "Text Files (*.txt);;All Files (*.*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(prompt_text)
+            QMessageBox.information(self, "Saved", f"Custom prompt saved to:\n{file_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", str(exc))
+
+    def _load_custom_prompt(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Custom Prompt",
+            "",
+            "Text Files (*.txt);;All Files (*.*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                prompt_text = handle.read()
+            if hasattr(self, "custom_prompt_input"):
+                self.custom_prompt_input.setPlainText(prompt_text)
+            if getattr(self, "_custom_prompt_collapsed", False):
+                self._toggle_custom_prompt_body()
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", str(exc))
+
+    def _fill_random_custom_prompt(self):
+        prompt_text = self._build_random_custom_prompt()
+        if hasattr(self, "custom_prompt_input"):
+            self.custom_prompt_input.setPlainText(prompt_text)
+        if getattr(self, "_custom_prompt_collapsed", False):
+            self._toggle_custom_prompt_body()
+
+    def _fill_similar_custom_prompt(self):
+        current_text = self._get_custom_prompt_text()
+        prompt_text = self._build_similar_custom_prompt(current_text)
+        if hasattr(self, "custom_prompt_input"):
+            self.custom_prompt_input.setPlainText(prompt_text)
+        if getattr(self, "_custom_prompt_collapsed", False):
+            self._toggle_custom_prompt_body()
+
+    def _build_random_custom_prompt(self):
+        seed_text = self.seed_input.text().strip() if hasattr(self, "seed_input") else ""
+        target_country = self.country_combo.currentText().strip() if hasattr(self, "country_combo") else "Worldwide"
+        target_count = int(self.count_spin.value()) if hasattr(self, "count_spin") else 10
+        seed_value = seed_text or "[SEED_KEYWORD]"
+        country_value = target_country or "Worldwide"
+        templates = [
+            (
+                "You are a YouTube keyword strategist.\n"
+                "Generate up to {count} strong YouTube keyword ideas related to \"{seed}\".\n"
+                "Prioritize scalable opportunities, strong search intent, and keywords that can support many future videos.\n"
+                "Avoid over-niche ideas too early. Keep the list practical and performance-oriented.\n"
+                "Market focus: {country}.\n"
+                "Return only a clean comma-separated list."
+            ),
+            (
+                "You are an expert in discovering high-performing YouTube search terms.\n"
+                "For the topic \"{seed}\", generate up to {count} keyword ideas that are broad enough to scale, but focused enough to attract intent-driven viewers.\n"
+                "Prefer raw search terms, problem-first keywords, and repeatable content opportunities.\n"
+                "Avoid generic filler and avoid going too deep unless the seed itself is already specific.\n"
+                "Country focus: {country}.\n"
+                "Output only a comma-separated list."
+            ),
+            (
+                "Act as a YouTube niche expansion strategist.\n"
+                "Starting from \"{seed}\", produce up to {count} keyword opportunities suitable for channels that want repeatable, searchable, monetizable content.\n"
+                "Mix short keywords, practical problem terms, and a few strong phrase-level opportunities.\n"
+                "Do not add commentary, numbering, or explanations.\n"
+                "Geography: {country}.\n"
+                "Return only comma-separated keywords."
+            ),
+            (
+                "You are helping a creator find scalable YouTube keyword opportunities from the seed \"{seed}\".\n"
+                "Generate up to {count} ideas for {country}.\n"
+                "Favor keywords that can branch into multiple subtopics later, instead of micro-niches immediately.\n"
+                "Prefer terms with clear search demand, cloning potential, and series potential.\n"
+                "Return only a comma-separated list with no extra text."
+            ),
+        ]
+        return random.choice(templates).format(count=target_count, seed=seed_value, country=country_value)
+
+    def _build_similar_custom_prompt(self, current_text):
+        current = str(current_text or "").strip()
+        if not current:
+            return self._build_random_custom_prompt()
+
+        seed_text = self.seed_input.text().strip() if hasattr(self, "seed_input") else ""
+        target_country = self.country_combo.currentText().strip() if hasattr(self, "country_combo") else "Worldwide"
+        target_count = int(self.count_spin.value()) if hasattr(self, "count_spin") else 10
+        seed_value = seed_text or "[SEED_KEYWORD]"
+        country_value = target_country or "Worldwide"
+
+        current = re.sub(r"\s+", " ", current).strip()
+        current = re.sub(
+            r"return only a clean comma-separated list\.?$",
+            "",
+            current,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        rewritten = self._rewrite_custom_prompt_template(
+            current_text=current,
+            seed_value=seed_value,
+            country_value=country_value,
+            target_count=target_count,
+        )
+        if rewritten:
+            return rewritten
+
+        variants = [
+            (
+                current
+                + "\nAdd emphasis on scalable parent-topic opportunities before going into small sub-niches."
+                + f"\nKeep the focus on YouTube search behavior in {country_value}."
+            ),
+            (
+                current
+                + "\nFavor short and medium-length keywords with strong cloning potential."
+                + "\nInclude raw terms, problem-first terms, and a few phrase-based opportunities."
+            ),
+            (
+                current
+                + f"\nGenerate no more than {target_count} ideas connected to \"{seed_value}\"."
+                + "\nPrefer opportunities that can later expand into multiple subtopics or content series."
+            ),
+            (
+                current
+                + "\nReduce generic blog-style phrases."
+                + "\nIncrease preference for search-driven YouTube keywords with clearer viewer intent."
+            ),
+        ]
+        return random.choice(variants).strip() + "\nReturn only a clean comma-separated list."
+
+    def _rewrite_custom_prompt_template(self, current_text, seed_value, country_value, target_count):
+        prompt = str(current_text or "").strip()
+        if not prompt:
+            return ""
+
+        rewritten = prompt
+
+        # Keep the same sentence structure, but update the most common variable fields.
+        rewritten = re.sub(
+            r"(?i)\b(?:exactly|up to|only)\s+\d+\b",
+            f"only {target_count}",
+            rewritten,
+        )
+        rewritten = re.sub(
+            r'(?i)(related to\s+)(["\']?)([^,"\n]+)\2',
+            lambda m: f'{m.group(1)}{seed_value}',
+            rewritten,
+            count=1,
+        )
+        rewritten = re.sub(
+            r'(?i)(for the topic\s+)(["\'])(.+?)\2',
+            lambda m: f'{m.group(1)}"{seed_value}"',
+            rewritten,
+            count=1,
+        )
+        rewritten = re.sub(
+            r'(?i)(seed\s+["\'])(.+?)(["\'])',
+            lambda m: f'{m.group(1)}{seed_value}{m.group(3)}',
+            rewritten,
+            count=1,
+        )
+        rewritten = re.sub(
+            r'(?i)(market focus:\s*)(.+?)(?=[\.\n]|$)',
+            lambda m: f'{m.group(1)}{country_value}',
+            rewritten,
+            count=1,
+        )
+        rewritten = re.sub(
+            r'(?i)(country focus:\s*)(.+?)(?=[\.\n]|$)',
+            lambda m: f'{m.group(1)}{country_value}',
+            rewritten,
+            count=1,
+        )
+        rewritten = re.sub(
+            r'(?i)(geography:\s*)(.+?)(?=[\.\n]|$)',
+            lambda m: f'{m.group(1)}{country_value}',
+            rewritten,
+            count=1,
+        )
+        rewritten = re.sub(
+            r'(?i)(generate\s+(?:up to|only)\s+\d+\s+ideas\s+for\s+)(.+?)(?=[\.\n]|$)',
+            lambda m: f'{m.group(1)}{country_value}',
+            rewritten,
+            count=1,
+        )
+
+        has_country_clause = any(
+            marker in rewritten.lower()
+            for marker in ("market focus:", "country focus:", "geography:")
+        )
+        has_generate_for_country = bool(
+            re.search(r'(?i)generate\s+(?:up to|only)\s+\d+\s+ideas\s+for\s+.+?(?=[\.\n]|$)', rewritten)
+        )
+
+        if rewritten == prompt and seed_value not in rewritten:
+            return ""
+
+        if not has_country_clause and not has_generate_for_country and country_value:
+            rewritten = rewritten.strip() + f"\nMarket focus: {country_value}."
+
+        if "comma-separated" not in rewritten.lower():
+            rewritten = rewritten.strip() + "\nReturn only a clean comma-separated list."
+        return rewritten.strip()
+
     def generate_keywords(self):
         if not REQUESTS_INSTALLED:
             QMessageBox.critical(self, "Missing Dependency", "The 'requests' module is missing. Please run:\n\npip install requests")
@@ -321,19 +669,25 @@ class KeywordsTab(QWidget):
         target_count = int(self.count_spin.value())
         provider = "gemini"
         model_name = self._selected_model_value()
+        prompt_mode = self._selected_prompt_mode()
+        prompt_mode_raw = self.prompt_mode_combo.currentText().strip() if hasattr(self, "prompt_mode_combo") else prompt_mode
         if not seed_text:
             QMessageBox.warning(self, "Empty Input", "Please enter a seed keyword first.")
+            return
+        if str(prompt_mode_raw or "").strip().lower() == "custom" and not self._get_custom_prompt_text():
+            QMessageBox.warning(self, "Empty Custom Prompt", "Please enter a custom prompt first.")
             return
             
         self.generate_btn.setText("Generating...")
         self.generate_btn.setEnabled(False)
         QApplication.processEvents()
         
-        prompt = self._build_keyword_generation_prompt(
+        prompt = self._resolve_generation_prompt(
             seed_text=seed_text,
             target_country=target_country,
             target_count=target_count,
             bilingual=self.toggle_bilingual.isChecked(),
+            prompt_mode=prompt_mode,
         )
         try:
             content = generate_keywords_api(prompt, provider=provider, model_name=model_name)
@@ -363,8 +717,9 @@ class KeywordsTab(QWidget):
             
         self.populate_table(results)
 
-    def _build_keyword_generation_prompt(self, seed_text, target_country, target_count, bilingual=False):
+    def _build_keyword_generation_prompt(self, seed_text, target_country, target_count, bilingual=False, prompt_mode="Balanced"):
         seed_scope = self._classify_seed_scope(seed_text)
+        normalized_mode = self._normalize_prompt_mode(prompt_mode)
         native_rules = ""
         if target_country != "Worldwide":
             native_rules = (
@@ -384,7 +739,25 @@ class KeywordsTab(QWidget):
                 "- Bilingual mode: output each keyword as `native language keyword - English translation`.\n"
             )
 
-        if seed_scope == "broad":
+        if normalized_mode == "broad seed":
+            scope_rules = (
+                "- Prompt mode: BROAD SEED.\n"
+                "- Prioritize broader, scalable, higher-demand YouTube keyword opportunities.\n"
+                "- Stay at the strong parent-topic layer or one step below it.\n"
+                "- Do NOT go too deep into tiny micro-niches unless the seed itself is already narrow.\n"
+                "- Favor keywords that are easier to scale into many videos and easier to clone into multiple content branches.\n"
+                "- Prefer a healthy mix of short root terms, strong problem terms, and only some broader phrases.\n"
+                "- Example behavior for broad topics: `health` should produce outputs closer to `cramp`, `sleep`, `anxiety`, `weight loss`, `gut health`, not overly detailed micro-angles.\n"
+            )
+        elif normalized_mode == "deep niche":
+            scope_rules = (
+                "- Prompt mode: DEEP NICHE.\n"
+                "- Go one to two layers deeper than normal into sub-niches, subtopics, and detailed content angles.\n"
+                "- Favor keywords that can still support repeatable series, but allow narrower search opportunities.\n"
+                "- It is acceptable to return more detailed and more specific YouTube search phrases than the balanced mode.\n"
+                "- If the seed is already specific, expand it further into adjacent sub-problems, use cases, and audience slices.\n"
+            )
+        elif seed_scope == "broad":
             scope_rules = (
                 "- The seed keyword is BROAD.\n"
                 "- Return broader, stronger, higher-demand YouTube search terms inside this topic.\n"
@@ -462,6 +835,37 @@ Output rules:
   - No markdown.
   - No extra notes.
   """
+
+    def _normalize_prompt_mode(self, prompt_mode):
+        text = str(prompt_mode or "").strip().lower()
+        valid_modes = {"balanced", "broad seed", "deep niche", "custom"}
+        return text if text in valid_modes else "balanced"
+
+    def _selected_prompt_mode(self):
+        if not hasattr(self, "prompt_mode_combo"):
+            return "Balanced"
+        selected = self.prompt_mode_combo.currentText().strip()
+        if not selected:
+            return "Balanced"
+        if selected.lower() == "custom":
+            return "Custom"
+        return selected
+
+    def _get_custom_prompt_text(self):
+        if not hasattr(self, "custom_prompt_input"):
+            return ""
+        return self.custom_prompt_input.toPlainText().strip()
+
+    def _resolve_generation_prompt(self, seed_text, target_country, target_count, bilingual, prompt_mode):
+        if self._normalize_prompt_mode(prompt_mode) == "custom":
+            return self._get_custom_prompt_text()
+        return self._build_keyword_generation_prompt(
+            seed_text=seed_text,
+            target_country=target_country,
+            target_count=target_count,
+            bilingual=bilingual,
+            prompt_mode=prompt_mode,
+        )
 
     def _classify_seed_scope(self, seed_text):
         text = " ".join(str(seed_text or "").strip().lower().split())
@@ -691,6 +1095,31 @@ Output rules:
     def open_import_volume_dialog(self): ImportVolumeDialog(self).exec()
     def get_keywords_count(self): return self.table.rowCount()
     def get_keywords_list(self): return [self.table.item(r,5).text() for r in range(self.table.rowCount()) if self.table.item(r,5)]
+    def receive_keywords_from_trends(self, keywords, source_tool="Trends"):
+        clean_keywords = []
+        seen = set()
+        for keyword in keywords or []:
+            text = " ".join(str(keyword or "").split()).strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            clean_keywords.append(text)
+        if not clean_keywords:
+            return False, ""
+
+        primary_seed = clean_keywords[0]
+        self.seed_input.setText(primary_seed)
+        self.seed_input.setCursorPosition(len(primary_seed))
+        self.seed_input.setFocus()
+        self.seed_input.selectAll()
+        self.seed_input.setToolTip(
+            f"Received {len(clean_keywords)} keyword(s) from {source_tool}. Current seed: {primary_seed}"
+        )
+        return True, primary_seed
+
     def apply_volume_data(self, vmap):
         m = 0
         self.table.blockSignals(True)

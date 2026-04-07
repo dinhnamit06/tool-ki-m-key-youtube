@@ -6,6 +6,10 @@ from PyQt6.QtCore import Qt
 from ui.keywords_tab import KeywordsTab
 from ui.trends_tab import TrendsTab
 from ui.videos_tab import VideosTab
+from ui.channels_tab import ChannelsTab
+from ui.video_to_text_tab import VideoToTextTab
+from ui.text_to_video_tab import TextToVideoTab
+from ui.comments_tab import CommentsTab
 from utils.constants import MAIN_STYLE
 from utils.proxy_utils import normalize_proxy
 
@@ -79,7 +83,7 @@ class TubeVibeApp(QMainWindow):
         n_layout = QHBoxLayout(navbar); n_layout.setContentsMargins(20, 0, 20, 0)
         
         self.nav_labels = []
-        tabs_names = ["Welcome", "Keywords", "Trends", "Videos", "Channels", "Video to Text", "Comments"]
+        tabs_names = ["Welcome", "Keywords", "Trends", "Videos", "Channels", "Video to Text", "Text to Video", "Comments"]
         for i, name in enumerate(tabs_names):
             lbl = QLabel(name)
             lbl.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -94,9 +98,10 @@ class TubeVibeApp(QMainWindow):
         self.tab_keywords = KeywordsTab(self)
         self.tab_trends = TrendsTab(self)
         self.tab_videos = VideosTab(self)
-        self.tab_channels = ToolInboxPage("Channels Tool", "Videos or channel seeds sent from other tools will appear here.")
-        self.tab_video_to_text = ToolInboxPage("Video to Text", "Selected video links sent for transcription will appear here.")
-        self.tab_comments = ToolInboxPage("Comments Tool", "Selected video links sent for comment extraction will appear here.")
+        self.tab_channels = ChannelsTab(self)
+        self.tab_video_to_text = VideoToTextTab(self)
+        self.tab_text_to_video = TextToVideoTab(self)
+        self.tab_comments = CommentsTab(self)
         
         # Connect signal: Keywords -> Trends data transfer
         self.tab_keywords.send_to_trends_signal.connect(self.handle_send_to_trends)
@@ -107,6 +112,7 @@ class TubeVibeApp(QMainWindow):
         self.main_stack.addWidget(self.tab_videos)
         self.main_stack.addWidget(self.tab_channels)
         self.main_stack.addWidget(self.tab_video_to_text)
+        self.main_stack.addWidget(self.tab_text_to_video)
         self.main_stack.addWidget(self.tab_comments)
         
         self.main_stack.setCurrentIndex(1)
@@ -148,11 +154,11 @@ class TubeVibeApp(QMainWindow):
         links = [str(link).strip() for link in (video_links or []) if str(link).strip()]
         if not links:
             return False
-        self.tab_comments.receive_payload(
-            "\n".join(links),
+        self.tab_comments.receive_links_for_import(
+            links,
             f"Received {len(links)} video link(s) from Videos tool.",
         )
-        self.switch_tab(6)
+        self.switch_tab(7)
         self.statusBar().showMessage(
             f"Sent {len(links)} video link(s) to Comments tool.", 4000
         )
@@ -182,13 +188,35 @@ class TubeVibeApp(QMainWindow):
         links = [str(link).strip() for link in (video_links or []) if str(link).strip()]
         if not links:
             return False
-        self.tab_video_to_text.receive_payload(
-            "\n".join(links),
+        self.tab_video_to_text.receive_links_for_import(
+            links,
             f"Received {len(links)} video link(s) from Videos tool.",
         )
         self.switch_tab(5)
         self.statusBar().showMessage(
             f"Sent {len(links)} video link(s) to Video to Text.", 4000
+        )
+        return True
+
+    def handle_send_channels_to_comments(self, rows, source_label="Channels tool"):
+        payload_rows = [dict(row) for row in (rows or []) if isinstance(row, dict)]
+        if not payload_rows:
+            return False
+        lines = []
+        for idx, row in enumerate(payload_rows, start=1):
+            lines.append(f"{idx}. {str(row.get('Title', '')).strip() or '(Untitled channel)'}")
+            lines.append(f"Channel Link: {str(row.get('Channel Link', row.get('input', ''))).strip()}")
+            lines.append(f"Country: {str(row.get('Country', 'not-given')).strip()}")
+            lines.append(f"Subscribers: {str(row.get('Subscribers', 'not-given')).strip()}")
+            lines.append(f"Description: {str(row.get('Description', 'not-given')).strip()}")
+            lines.append("")
+        self.tab_comments.receive_payload(
+            "\n".join(lines).strip(),
+            f"Received {len(payload_rows)} channel row(s) from {source_label}.",
+        )
+        self.switch_tab(7)
+        self.statusBar().showMessage(
+            f"Sent {len(payload_rows)} channel row(s) to Comments tool.", 4000
         )
         return True
 
@@ -225,3 +253,21 @@ class TubeVibeApp(QMainWindow):
         self.proxy_runtime_settings = {
             "max_proxies_per_run": max(1, int(max_proxies_per_run)),
         }
+
+    def closeEvent(self, event):
+        for widget in (
+            getattr(self, "tab_keywords", None),
+            getattr(self, "tab_trends", None),
+            getattr(self, "tab_videos", None),
+            getattr(self, "tab_channels", None),
+            getattr(self, "tab_video_to_text", None),
+            getattr(self, "tab_text_to_video", None),
+            getattr(self, "tab_comments", None),
+        ):
+            shutdown = getattr(widget, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception:
+                    pass
+        super().closeEvent(event)

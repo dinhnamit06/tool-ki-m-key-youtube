@@ -72,6 +72,7 @@ def _normalize_numeric_label(text: str, default: str = "not-given") -> str:
     if not raw:
         return default
     raw_lc = raw.lower()
+    raw_lc = raw_lc.replace(",", "")
     if "turned off" in raw_lc:
         return "0"
     if "no comment" in raw_lc or "no subscriber" in raw_lc:

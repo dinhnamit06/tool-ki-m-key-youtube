@@ -46,6 +46,7 @@ from core.videos_fetcher import (
     VideoSearchWorker,
     fetch_video_page_details,
 )
+from ui.video_title_generator_dialog import VideoTitleGeneratorDialog
 from utils.constants import REQUESTS_INSTALLED, TABLE_SCROLLBAR_STYLE
 
 try:
@@ -2628,9 +2629,10 @@ class VideosTab(QWidget):
 
         self.btn_mode_search = QPushButton("Search")
         self.btn_mode_browse = QPushButton("Browse or Import")
+        self.btn_tools = QPushButton("Tools")
         self.btn_analyze = QPushButton("Analyze")
 
-        for btn in (self.btn_mode_search, self.btn_mode_browse):
+        for btn in (self.btn_mode_search, self.btn_mode_browse, self.btn_tools):
             btn.setFixedHeight(28)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
@@ -2648,12 +2650,39 @@ class VideosTab(QWidget):
         self.btn_mode_search.clicked.connect(lambda: self.switch_mode("search"))
         self.btn_mode_browse.clicked.connect(lambda: self.switch_mode("browse"))
         self.btn_analyze.clicked.connect(self.open_analyze_dialog)
+        self._setup_tools_menu()
 
         h.addWidget(self.btn_mode_search)
         h.addWidget(self.btn_mode_browse)
+        h.addWidget(self.btn_tools)
         h.addStretch()
         h.addWidget(self.btn_analyze)
         parent_layout.addWidget(bar)
+
+    def _setup_tools_menu(self):
+        menu = QMenu(self.btn_tools)
+        menu.setStyleSheet(
+            "QMenu { background-color:#ffffff; color:#111111; border:1px solid #c7c7c7; }"
+            "QMenu::item { padding:6px 16px; }"
+            "QMenu::item:selected { background-color:#f1d5df; color:#111111; }"
+        )
+
+        act_spinner = menu.addAction("Content Spinner Tool")
+        act_title_generator = menu.addAction("Video Title Generator Tool")
+        act_ke = menu.addAction("Keywords Everywhere Tool")
+        act_download = menu.addAction("Download Youtube Video Tool")
+
+        act_spinner.triggered.connect(lambda: self._show_coming_soon("Content Spinner Tool"))
+        act_title_generator.triggered.connect(self._open_video_title_generator_tool)
+        act_ke.triggered.connect(lambda: self._show_coming_soon("Keywords Everywhere Tool"))
+        act_download.triggered.connect(lambda: self._show_coming_soon("Download Youtube Video Tool"))
+
+        self.btn_tools.setMenu(menu)
+
+    def _open_video_title_generator_tool(self):
+        seed_keyword = self.input_search_phrase.text().strip()
+        dlg = VideoTitleGeneratorDialog(self, initial_keyword=seed_keyword)
+        dlg.exec()
 
     def _build_left_panel(self):
         panel = QFrame()

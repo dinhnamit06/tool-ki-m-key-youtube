@@ -508,6 +508,34 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 - Test:
   - PASS checklist parity theo bang 1.2.
 
+### SV-31 - Video Title Generator tool (Tools menu)
+- UI:
+  - them nut `Tools` tren mode bar trong `Videos`.
+  - menu theo thu tu:
+    - `Content Spinner Tool`
+    - `Video Title Generator Tool`
+    - `Keywords Everywhere Tool`
+    - `Download Youtube Video Tool`
+  - popup `Video Title Generator` gom:
+    - input keyword/topic
+    - dropdown so luong title (10/20/30/50)
+    - nut `Generate`
+    - table cot: checkbox, title, word count, character count, controls
+    - controls moi dong: `Copy | Youtube | Google`
+    - footer: `File`, `Filters`, `Clear`, `Total`
+- Logic:
+  - tao title ngau nhien theo template, tranh trung lap.
+  - `Copy` copy title vao clipboard.
+  - `Youtube` / `Google` mo tab tim kiem title.
+  - `File` ho tro save CSV/TXT va copy all.
+  - `Filters` loc theo chuoi chua trong title.
+  - cac tool chua lam o menu hien `coming soon`.
+- Test:
+  - mo `Tools -> Video Title Generator Tool` thanh cong.
+  - generate 10/20/30/50 title thanh cong.
+  - copy/open/search/save/filter hoat dong.
+  - compile/import pass: `ui/videos_tab.py`, `ui/video_title_generator_dialog.py`.
+
 ## 7) Checklist test manual (dung lai moi lan)
 - [ ] Search phrase rong -> canh bao.
 - [ ] Search phrase hop le -> co data.
@@ -536,6 +564,7 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 | Download videos | `21 tube-atlas-downloading-videos` | done/doing/todo | SV-26 | |
 | Download thumbnails | `22 tube-atlas-download-video-thumbnails` | done/doing/todo | SV-27 | |
 | Analyze titles | `11 tube-atlas-analyze-titles` | done/doing/todo | SV-28 | |
+| Video title generator | Tube Atlas videos tool menu + generator popup | done/doing/todo | SV-31 | |
 
 ## 9) Quy dinh truoc khi sang step tiep
 - Neu step hien tai chua PASS UI + PASS logic + PASS test + co SCR -> khong qua step moi.
