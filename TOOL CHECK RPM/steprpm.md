@@ -38,11 +38,11 @@ Status: done
 
 ## RPM-07
 - Sort and ranking controls
-Status: pending
+Status: done
 
 ## RPM-08
 - RPM Predictor page
-Status: pending
+Status: done
 
 ## RPM-09
 - Browser login / session shell

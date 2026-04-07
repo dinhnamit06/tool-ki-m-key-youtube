@@ -137,9 +137,10 @@ tham chieu tu video NexLev ma khong lam lon logic cua tool YTB chinh.
   - `Channels page` voi filter sidebar co dinh
   - `Filter template box` + `Filter Templates` popup cho `Channels`
   - `Save/load` custom filter templates qua JSON
+  - `Sort/Ranking controls` dung chung cho overview va channels
+  - `RPM Predictor` page voi local predictor service
 - Chua co:
   - browser login / scraping NexLev
-  - rpm predictor page
   - nexlev ai page
   - advanced mode
   - export/import
@@ -160,6 +161,5 @@ tham chieu tu video NexLev ma khong lam lon logic cua tool YTB chinh.
 ## 7) Huong di tiep
 - Lam tung step nho giong tool YTB.
 - Sau V1 shell:
-  1. sort/ranking controls
-  2. `RPM Predictor` page
-  3. browser login flow neu can
+  1. browser login flow neu can
+  2. hardening / polish pass

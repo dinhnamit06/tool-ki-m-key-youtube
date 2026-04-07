@@ -41,6 +41,21 @@ class RPMFilterState:
     hide_revealed_channels: bool = False
 
 
+SORT_OPTIONS: list[tuple[str, str]] = [
+    ("AI Rank", "ai_rank"),
+    ("RPM", "rpm"),
+    ("Revenue / Month", "avg_monthly_revenue"),
+    ("Revenue / Lifetime", "total_revenue_generated"),
+    ("Views / Month", "avg_monthly_views"),
+    ("Avg Views / Video", "avg_views_per_video"),
+    ("Subscribers", "subscribers"),
+    ("Total Views", "total_views"),
+    ("Upload Count", "upload_count"),
+    ("Last Upload Date", "last_upload_date"),
+    ("First Upload Date", "first_upload_date"),
+]
+
+
 class RPMFinderService:
     def __init__(self, channels: Sequence[ChannelRecord]):
         self._channels = list(channels)
@@ -97,6 +112,22 @@ class RPMFinderService:
             results.append(item)
         return results
 
+    def sort_channels(self, channels: Sequence[ChannelRecord], sort_key: str, descending: bool = True) -> list[ChannelRecord]:
+        sort_name = str(sort_key or "ai_rank").strip().lower()
+        if sort_name == "ai_rank":
+            return sorted(
+                channels,
+                key=lambda item: (
+                    1 if item.picked_by_ai else 0,
+                    item.rpm,
+                    item.avg_monthly_revenue,
+                    item.avg_monthly_views,
+                    item.avg_views_per_video,
+                ),
+                reverse=descending,
+            )
+        return sorted(channels, key=lambda item: self._sort_value(item, sort_name), reverse=descending)
+
     @staticmethod
     def _match_range(value: float, min_value: float, max_value: float) -> bool:
         return min_value <= value <= max_value
@@ -117,7 +148,35 @@ class RPMFinderService:
             return query_text in item.title.lower()
         return query_text in haystack
 
+    @staticmethod
+    def _sort_value(item: ChannelRecord, sort_name: str):
+        mapping = {
+            "rpm": item.rpm,
+            "avg_monthly_revenue": item.avg_monthly_revenue,
+            "total_revenue_generated": item.total_revenue_generated,
+            "avg_monthly_views": item.avg_monthly_views,
+            "avg_views_per_video": item.avg_views_per_video,
+            "subscribers": item.subscribers,
+            "total_views": item.total_views,
+            "upload_count": item.upload_count,
+            "last_upload_date": item.last_upload_date,
+            "first_upload_date": item.first_upload_date,
+        }
+        return mapping.get(sort_name, item.rpm)
+
 
 def categories_from_channels(channels: Iterable[ChannelRecord]) -> list[str]:
     values = sorted({item.category for item in channels})
     return ["All Categories", *values]
+
+
+def sort_labels() -> list[str]:
+    return [label for label, _key in SORT_OPTIONS]
+
+
+def sort_key_from_label(label: str) -> str:
+    label_text = str(label or "").strip()
+    for option_label, option_key in SORT_OPTIONS:
+        if option_label == label_text:
+            return option_key
+    return "ai_rank"

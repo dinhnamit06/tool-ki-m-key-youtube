@@ -50,6 +50,7 @@ from core.videos_fetcher import (
 from ui.content_spinner_tool_dialog import VideosContentSpinnerDialog
 from ui.video_title_generator_dialog import VideoTitleGeneratorDialog
 from utils.constants import REQUESTS_INSTALLED, TABLE_SCROLLBAR_STYLE
+from utils.session_store import load_session_json, save_session_json
 
 try:
     import requests
@@ -2542,6 +2543,11 @@ class VideosTab(QWidget):
         self._status_flush_timer.setInterval(120)
         self._status_flush_timer.timeout.connect(self._flush_status_message)
         self._pending_status_message = ""
+        self._session_restore_in_progress = False
+        self._session_save_timer = QTimer(self)
+        self._session_save_timer.setSingleShot(True)
+        self._session_save_timer.setInterval(900)
+        self._session_save_timer.timeout.connect(self._save_session_state)
         self._title_analysis_stop_words = list(DEFAULT_STOP_WORDS)
         self._dark_label_style = "QLabel { color: #f3f4f6; }"
         self._light_input_style = (
@@ -2559,6 +2565,7 @@ class VideosTab(QWidget):
             "QPushButton:hover { background-color:#ff1a25; }"
         )
         self.setup_ui()
+        self._restore_session_state()
 
     @staticmethod
     def _empty_video_row_dict():
@@ -2654,6 +2661,177 @@ class VideosTab(QWidget):
         self.switch_mode("search")
         self._refresh_header_filter_tooltips()
         self._update_status_labels()
+
+    def _session_key(self):
+        return "videos_tab_state"
+
+    def _session_rows_payload(self):
+        rows = []
+        for row in self._all_rows_cache:
+            normalized = self._normalize_video_row(dict(row or {}))
+            rows.append({key: normalized.get(key, "") for key in normalized.keys()})
+        return rows
+
+    def _checked_row_keys(self):
+        checked_keys = []
+        for row in range(self.videos_table.rowCount()):
+            item = self.videos_table.item(row, 0)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                continue
+            payload = self._row_payload(row)
+            video_id = str(payload.get("Video ID", "")).strip()
+            video_link = str(payload.get("Video Link", "")).strip()
+            if video_id or video_link:
+                checked_keys.append({"video_id": video_id, "video_link": video_link})
+        return checked_keys
+
+    def _videos_session_payload(self):
+        return {
+            "version": 1,
+            "mode": str(self._mode or "search"),
+            "inputs": {
+                "search_phrase": self.input_search_phrase.text().strip(),
+                "youtube_first": self.chk_youtube_first.isChecked(),
+                "sort": self.combo_sort.currentText().strip(),
+                "contains_subtitles": self.chk_contains_subtitles.isChecked(),
+                "creative_commons": self.chk_creative_commons.isChecked(),
+                "google": self.chk_google.isChecked(),
+                "bing": self.chk_bing.isChecked(),
+                "pages": self.combo_pages.currentText().strip() or "1",
+                "trending_region_index": int(self.combo_trending_region.currentIndex()),
+                "video_links_text": self.input_video_links.toPlainText(),
+                "image_size": int(self.slider_image_size.value()),
+            },
+            "sort": {
+                "column": str(self._sort_column_name or ""),
+                "descending": bool(self._sort_descending),
+            },
+            "filter": dict(self._active_filter or {}),
+            "checked_rows": self._checked_row_keys(),
+            "column_widths": {
+                str(col): int(self.videos_table.columnWidth(col))
+                for col in range(self.videos_table.columnCount())
+            },
+            "rows": self._session_rows_payload(),
+        }
+
+    def _schedule_session_save(self):
+        if self._session_restore_in_progress:
+            return
+        self._session_save_timer.start()
+
+    def _save_session_state(self):
+        if self._session_restore_in_progress:
+            return
+        try:
+            save_session_json(self._session_key(), self._videos_session_payload())
+        except Exception:
+            pass
+
+    def _apply_checked_rows_from_session(self, checked_rows):
+        normalized = set()
+        for item in checked_rows or []:
+            if not isinstance(item, dict):
+                continue
+            video_id = str(item.get("video_id", "")).strip()
+            video_link = str(item.get("video_link", "")).strip()
+            if video_id or video_link:
+                normalized.add((video_id, video_link))
+        if not normalized:
+            return
+
+        self._checkbox_syncing = True
+        try:
+            for row in range(self.videos_table.rowCount()):
+                payload = self._row_payload(row)
+                key = (
+                    str(payload.get("Video ID", "")).strip(),
+                    str(payload.get("Video Link", "")).strip(),
+                )
+                if key not in normalized:
+                    continue
+                item = self.videos_table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(Qt.CheckState.Checked)
+        finally:
+            self._checkbox_syncing = False
+        self._update_status_labels()
+
+    def _restore_session_state(self):
+        state = load_session_json(self._session_key(), default={})
+        if not isinstance(state, dict) or not state:
+            return
+
+        self._session_restore_in_progress = True
+        try:
+            inputs = dict(state.get("inputs", {}) or {})
+            self.input_search_phrase.setText(str(inputs.get("search_phrase", "")).strip())
+            self.chk_youtube_first.setChecked(bool(inputs.get("youtube_first", True)))
+            self.chk_contains_subtitles.setChecked(bool(inputs.get("contains_subtitles", False)))
+            self.chk_creative_commons.setChecked(bool(inputs.get("creative_commons", False)))
+            self.chk_google.setChecked(bool(inputs.get("google", True)))
+            self.chk_bing.setChecked(bool(inputs.get("bing", True)))
+
+            sort_text = str(inputs.get("sort", "")).strip()
+            if sort_text:
+                index = self.combo_sort.findText(sort_text)
+                if index >= 0:
+                    self.combo_sort.setCurrentIndex(index)
+
+            pages_text = str(inputs.get("pages", "1")).strip() or "1"
+            index = self.combo_pages.findText(pages_text)
+            if index >= 0:
+                self.combo_pages.setCurrentIndex(index)
+
+            trending_index = int(inputs.get("trending_region_index", 0) or 0)
+            if 0 <= trending_index < self.combo_trending_region.count():
+                self.combo_trending_region.setCurrentIndex(trending_index)
+
+            self.input_video_links.setPlainText(str(inputs.get("video_links_text", "")))
+            self.slider_image_size.setValue(int(inputs.get("image_size", 72) or 72))
+
+            mode = str(state.get("mode", "search")).strip().lower()
+            self.switch_mode("browse" if mode == "browse" else "search")
+
+            sort_state = dict(state.get("sort", {}) or {})
+            self._sort_column_name = str(sort_state.get("column", "")).strip()
+            self._sort_descending = bool(sort_state.get("descending", True))
+
+            restored_filter = dict(state.get("filter", {}) or {})
+            if restored_filter:
+                restored_filter["numeric"] = dict(restored_filter.get("numeric", {}) or {})
+                self._active_filter = restored_filter
+            else:
+                self._active_filter = self._default_filter_state()
+
+            restored_rows = []
+            for row in list(state.get("rows", []) or []):
+                if not isinstance(row, dict):
+                    continue
+                restored_rows.append(self._normalize_video_row(dict(row)))
+            self._all_rows_cache = restored_rows
+
+            if self._sort_column_name:
+                self._sort_all_rows_cache()
+            self._refresh_videos_header_labels()
+            self._rebuild_table_from_cache()
+            self._apply_checked_rows_from_session(state.get("checked_rows", []))
+
+            widths = dict(state.get("column_widths", {}) or {})
+            for key, width in widths.items():
+                try:
+                    col = int(key)
+                    px = int(width)
+                except Exception:
+                    continue
+                if 0 <= col < self.videos_table.columnCount() and px > 12:
+                    self.videos_table.setColumnWidth(col, px)
+
+            self._defer_scrollbar_tune()
+            if self._all_rows_cache:
+                self._set_status(f"Restored {len(self._all_rows_cache)} saved video row(s).")
+        finally:
+            self._session_restore_in_progress = False
 
     def _build_mode_bar(self, parent_layout):
         bar = QFrame()
@@ -2769,6 +2947,7 @@ class VideosTab(QWidget):
                 break
 
         self._set_status(f"Updated {target_field.lower()} for row {row + 1}.")
+        self._schedule_session_save()
 
     def _build_left_panel(self):
         panel = QFrame()
@@ -2795,6 +2974,7 @@ class VideosTab(QWidget):
         self.input_search_phrase = QLineEdit()
         self.input_search_phrase.setPlaceholderText("Search Phrase")
         self.input_search_phrase.setStyleSheet(self._light_input_style)
+        self.input_search_phrase.textChanged.connect(self._schedule_session_save)
 
         self.btn_search = QPushButton("Search")
         self.btn_search.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2823,6 +3003,7 @@ class VideosTab(QWidget):
         self.chk_youtube_first = QCheckBox("Youtube (first page results only)")
         self.chk_youtube_first.setChecked(True)
         self.chk_youtube_first.setStyleSheet(self._dark_checkbox_style)
+        self.chk_youtube_first.stateChanged.connect(self._schedule_session_save)
         v.addWidget(self.chk_youtube_first)
 
         row_sort = QHBoxLayout()
@@ -2830,6 +3011,7 @@ class VideosTab(QWidget):
         self.combo_sort = QComboBox()
         self.combo_sort.addItems(["Relevance", "Upload date", "View count", "Rating"])
         self.combo_sort.setStyleSheet(self._light_combo_style)
+        self.combo_sort.currentTextChanged.connect(self._schedule_session_save)
         row_sort.addWidget(self.combo_sort, stretch=1)
         v.addLayout(row_sort)
 
@@ -2837,6 +3019,8 @@ class VideosTab(QWidget):
         self.chk_creative_commons = QCheckBox("Creative Commons License")
         self.chk_contains_subtitles.setStyleSheet(self._dark_checkbox_style)
         self.chk_creative_commons.setStyleSheet(self._dark_checkbox_style)
+        self.chk_contains_subtitles.stateChanged.connect(self._schedule_session_save)
+        self.chk_creative_commons.stateChanged.connect(self._schedule_session_save)
         v.addWidget(self.chk_contains_subtitles)
         v.addWidget(self.chk_creative_commons)
 
@@ -2847,6 +3031,8 @@ class VideosTab(QWidget):
         self.chk_bing.setChecked(True)
         self.chk_google.setStyleSheet(self._dark_checkbox_style)
         self.chk_bing.setStyleSheet(self._dark_checkbox_style)
+        self.chk_google.stateChanged.connect(self._schedule_session_save)
+        self.chk_bing.stateChanged.connect(self._schedule_session_save)
         row_source.addWidget(self.chk_google)
         row_source.addWidget(self.chk_bing)
         row_source.addSpacing(8)
@@ -2855,6 +3041,7 @@ class VideosTab(QWidget):
         self.combo_pages.addItems([str(i) for i in range(1, 11)])
         self.combo_pages.setCurrentText("1")
         self.combo_pages.setStyleSheet(self._light_combo_style)
+        self.combo_pages.currentTextChanged.connect(self._schedule_session_save)
         row_source.addWidget(self.combo_pages)
         v.addLayout(row_source)
 
@@ -2881,6 +3068,7 @@ class VideosTab(QWidget):
         ]
         for label, code in trending_regions:
             self.combo_trending_region.addItem(label, code)
+        self.combo_trending_region.currentIndexChanged.connect(self._schedule_session_save)
         row_trending.addWidget(region_label)
         row_trending.addWidget(self.combo_trending_region, stretch=1)
         v.addLayout(row_trending)
@@ -2947,6 +3135,7 @@ class VideosTab(QWidget):
             "QTextEdit { background:#ffffff; color:#111111; border:1px solid #c7c7c7; border-radius:3px; padding:6px 8px; }"
             "QTextEdit:focus { border:1px solid #9c9c9c; }"
         )
+        self.input_video_links.textChanged.connect(self._schedule_session_save)
         v.addWidget(self.input_video_links)
         self.lbl_import_hint = QLabel("Tips: support watch, youtu.be, and shorts links.")
         self.lbl_import_hint.setStyleSheet("QLabel { color:#b8bfd1; font-size:12px; }")
@@ -2989,6 +3178,7 @@ class VideosTab(QWidget):
         header = self.videos_table.horizontalHeader()
         header.setStretchLastSection(False)
         header.sectionClicked.connect(self._on_header_section_clicked)
+        header.sectionResized.connect(lambda *_args: self._schedule_session_save())
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         for col in range(2, len(VIDEO_TABLE_COLUMNS)):
@@ -3068,6 +3258,7 @@ class VideosTab(QWidget):
         self._mode = mode
         self.left_stack.setCurrentIndex(0 if mode == "search" else 1)
         self._apply_mode_button_styles()
+        self._schedule_session_save()
 
     def _apply_mode_button_styles(self):
         active_style = (
@@ -3086,6 +3277,7 @@ class VideosTab(QWidget):
         height_px = max(22, int(value * 9 / 16))
         self.videos_table.verticalHeader().setDefaultSectionSize(max(28, height_px + 8))
         self._refresh_visible_thumbnails()
+        self._schedule_session_save()
 
     def _on_table_item_changed(self, item):
         if self._checkbox_syncing:
@@ -3093,6 +3285,7 @@ class VideosTab(QWidget):
         if item is None or item.column() != 0:
             return
         self._update_status_labels()
+        self._schedule_session_save()
 
     def _update_status_labels(self):
         total = self.videos_table.rowCount()
@@ -3127,6 +3320,8 @@ class VideosTab(QWidget):
         self._all_rows_cache = []
         self._active_filter = self._default_filter_state()
         self._clear_table_ui_only()
+        self._refresh_videos_header_labels()
+        self._schedule_session_save()
 
     def _set_status(self, message):
         self._pending_status_message = str(message or "").strip()
@@ -3228,6 +3423,7 @@ class VideosTab(QWidget):
 
         for column_name in VIDEO_TEXT_COLUMNS:
             self._set_table_text_item(row, column_name, merged.get(column_name, ""))
+        self._schedule_session_save()
 
     def _on_metadata_enrich_finished(self, result):
         updated = int((result or {}).get("updated", 0))
@@ -3576,6 +3772,7 @@ class VideosTab(QWidget):
             self.videos_table.scrollToBottom()
         self._defer_scrollbar_tune()
         self._update_status_labels()
+        self._schedule_session_save()
 
     def _on_table_cell_double_clicked(self, row, column):
         if column != VIDEO_COLUMN_INDEX["Video Link"]:
@@ -3710,10 +3907,12 @@ class VideosTab(QWidget):
         next_filter["numeric"] = dict(self._active_filter.get("numeric", {}) or {})
         self._active_filter = next_filter
         self._rebuild_table_from_cache()
+        self._schedule_session_save()
 
     def reset_video_filters(self):
         self._active_filter = self._default_filter_state()
         self._rebuild_table_from_cache()
+        self._schedule_session_save()
 
     def _refresh_header_filter_tooltips(self):
         for index, column_name in enumerate(VIDEO_TABLE_COLUMNS):
@@ -3794,6 +3993,7 @@ class VideosTab(QWidget):
         self._rebuild_table_from_cache()
         direction = "descending" if self._sort_descending else "ascending"
         self._set_status(f"Sorted by {column_name} ({direction}).")
+        self._schedule_session_save()
 
     def auto_fit_column_widths(self):
         if self.videos_table.columnCount() == 0:
@@ -3809,6 +4009,7 @@ class VideosTab(QWidget):
         self.videos_table.setColumnWidth(1, self._default_column_widths[1])
         self._defer_scrollbar_tune()
         self._set_status("Auto-fit column widths applied.")
+        self._schedule_session_save()
 
     def reset_column_widths(self):
         if self.videos_table.columnCount() == 0:
@@ -3823,6 +4024,7 @@ class VideosTab(QWidget):
             self.videos_table.setColumnWidth(col, width)
         self._defer_scrollbar_tune()
         self._set_status("Column widths reset.")
+        self._schedule_session_save()
 
     def _reset_table_search_state(self):
         self._search_hits = []
@@ -3920,6 +4122,7 @@ class VideosTab(QWidget):
                 changed += 1
         if changed:
             self._update_status_labels()
+            self._schedule_session_save()
 
     def _set_all_check_state(self, checked):
         self._set_row_check_state(list(range(self.videos_table.rowCount())), checked)
@@ -4597,6 +4800,7 @@ class VideosTab(QWidget):
             ]
         self._update_status_labels()
         self._set_status(f"Deleted {len(rows)} row(s).")
+        self._schedule_session_save()
 
     def _on_table_context_menu(self, position):
         clicked_item = self.videos_table.itemAt(position)
@@ -4948,9 +5152,11 @@ class VideosTab(QWidget):
             self._set_status(
                 f"Received {len(cleaned)} keywords from {src}. Using first keyword for now."
             )
+        self._schedule_session_save()
         return True
 
     def closeEvent(self, event):
+        self._save_session_state()
         for worker_name in (
             "_search_worker",
             "_trending_worker",
@@ -4981,4 +5187,5 @@ class VideosTab(QWidget):
         self._thumbnail_pending_rows.clear()
         self._scrollbar_tune_timer.stop()
         self._status_flush_timer.stop()
+        self._session_save_timer.stop()
         super().closeEvent(event)

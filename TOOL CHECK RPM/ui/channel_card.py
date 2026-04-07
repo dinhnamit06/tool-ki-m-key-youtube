@@ -31,7 +31,7 @@ class MetricTile(QFrame):
 class ChannelCard(QFrame):
     toggled = pyqtSignal(str, bool)
 
-    def __init__(self, channel: ChannelRecord, start_expanded: bool | None = None):
+    def __init__(self, channel: ChannelRecord, start_expanded: bool | None = None, rank_index: int | None = None):
         super().__init__()
         self.setObjectName("channel_card")
         self.channel = channel
@@ -46,6 +46,13 @@ class ChannelCard(QFrame):
         title_wrap.setSpacing(4)
         title_row = QHBoxLayout()
         title_row.setSpacing(10)
+
+        if rank_index is not None:
+            rank_badge = QLabel(f"#{rank_index}")
+            rank_badge.setStyleSheet(
+                "QLabel { background:#111827; color:#ffffff; border-radius:8px; padding:4px 8px; font-weight:800; font-size:11px; }"
+            )
+            title_row.addWidget(rank_badge)
 
         self.lbl_title = QLabel(channel.title)
         self.lbl_title.setStyleSheet("font-size:18px; font-weight:800; color:#18202a;")

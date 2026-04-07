@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QStackedWi
 
 from ui.channels_page import ChannelsPage
 from ui.rpm_finder_page import RPMFinderPage
+from ui.rpm_predictor_page import RPMPredictorPage
 from ui.sidebar_nav import SidebarNav
 from utils.styles import MAIN_STYLE
 
@@ -71,7 +72,7 @@ class YTBRPMApp(QMainWindow):
             "keywords": PlaceholderPage("Keywords", "This page is reserved for a later RPM step.", self),
             "custom_keywords": PlaceholderPage("Custom Keywords", "This page is reserved for a later RPM step.", self),
             "saved": PlaceholderPage("Saved", "This page is reserved for a later RPM step.", self),
-            "rpm_predictor": PlaceholderPage("RPM Predictor", "This page is reserved for RPM-08.", self),
+            "rpm_predictor": RPMPredictorPage(self),
             "nexlev_ai": PlaceholderPage("NexLev AI", "This page is reserved for a later RPM step.", self),
         }
         for page in self.pages.values():
@@ -89,6 +90,6 @@ class YTBRPMApp(QMainWindow):
         label = {
             "rpm_finder": "RPM Finder overview ready.",
             "channels": "Channels page ready.",
-            "rpm_predictor": "RPM Predictor page placeholder ready.",
+            "rpm_predictor": "RPM Predictor page ready.",
         }.get(page_key, f"{page_key.replace('_', ' ').title()} page ready.")
         self.statusBar().showMessage(label, 2500)

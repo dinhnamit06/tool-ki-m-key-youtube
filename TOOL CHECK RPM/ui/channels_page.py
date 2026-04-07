@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.rpm_data import ChannelRecord, build_sample_channels
-from core.rpm_service import RPMFilterState, RPMFinderService, categories_from_channels
+from core.rpm_service import RPMFilterState, RPMFinderService, categories_from_channels, sort_key_from_label, sort_labels
 from core.rpm_template_store import RPMTemplateStore
 from core.rpm_templates import RPMFilterTemplate, build_builtin_templates, clone_state, summarize_template
 from ui.channel_card import ChannelCard
@@ -37,6 +37,8 @@ class ChannelsPage(QWidget):
         self.service = RPMFinderService(self.channels)
         self.filter_state = RPMFilterState()
         self.current_search_mode = "Keyword"
+        self.current_sort_label = "AI Rank"
+        self.current_sort_desc = True
         self.template_store = RPMTemplateStore()
         self.templates = [*build_builtin_templates(), *self.template_store.load_custom_templates()]
         self.current_template_name = "Default"
@@ -217,6 +219,17 @@ class ChannelsPage(QWidget):
         top_layout.addLayout(search_row)
 
         hint_row = QHBoxLayout()
+        hint_row.addWidget(QLabel("Sort By"))
+        self.cmb_sort = QComboBox()
+        self.cmb_sort.addItems(sort_labels())
+        self.cmb_sort.setCurrentText(self.current_sort_label)
+        self.cmb_sort.currentTextChanged.connect(self._on_sort_changed)
+        hint_row.addWidget(self.cmb_sort)
+        hint_row.addWidget(QLabel("Order"))
+        self.cmb_order = QComboBox()
+        self.cmb_order.addItems(["High to Low", "Low to High"])
+        self.cmb_order.currentTextChanged.connect(self._on_order_changed)
+        hint_row.addWidget(self.cmb_order)
         self.lbl_scope = QLabel("Mode: Channels page with fixed filter sidebar")
         self.lbl_scope.setObjectName("muted_label")
         hint_row.addWidget(self.lbl_scope)
@@ -435,6 +448,14 @@ class ChannelsPage(QWidget):
         self.current_search_mode = value
         self.search_input.setPlaceholderText("Search a keyword..." if value == "Keyword" else "Search a channel...")
 
+    def _on_sort_changed(self, value: str):
+        self.current_sort_label = value
+        self._apply_filters()
+
+    def _on_order_changed(self, value: str):
+        self.current_sort_desc = value == "High to Low"
+        self._apply_filters()
+
     def _build_state_from_controls(self) -> RPMFilterState:
         return RPMFilterState(
             category=self.cmb_category.currentText(),
@@ -476,6 +497,8 @@ class ChannelsPage(QWidget):
         self.cmb_template.setCurrentText("Default")
         self.search_input.clear()
         self.cmb_search_mode.setCurrentText("Keyword")
+        self.cmb_sort.setCurrentText("AI Rank")
+        self.cmb_order.setCurrentText("High to Low")
         self._sync_controls_from_state()
         self._update_template_summary("Default")
         self._apply_filters()
@@ -484,6 +507,7 @@ class ChannelsPage(QWidget):
         self.filter_state = self._build_state_from_controls()
         query = self.search_input.text().strip()
         results = self.service.filter_channels(self.current_search_mode, query, self.filter_state)
+        results = self.service.sort_channels(results, sort_key_from_label(self.current_sort_label), self.current_sort_desc)
         self._render_results(results)
 
     def _render_results(self, channels: Sequence[ChannelRecord]):
@@ -506,13 +530,16 @@ class ChannelsPage(QWidget):
             layout.addWidget(hint)
             self.results_layout.addWidget(empty)
         else:
-            for channel in channels:
-                card = ChannelCard(channel, start_expanded=True)
+            for index, channel in enumerate(channels, start=1):
+                card = ChannelCard(channel, start_expanded=True, rank_index=index)
                 card.toggled.connect(self._on_card_toggled)
                 self.results_layout.addWidget(card)
 
         self.results_layout.addStretch()
-        self.footer_label.setText(f"Showing {len(channels)} channel(s) from {len(self.channels)} sample records.")
+        order_text = "desc" if self.current_sort_desc else "asc"
+        self.footer_label.setText(
+            f"Showing {len(channels)} channel(s) from {len(self.channels)} sample records. Sorted by {self.current_sort_label} ({order_text})."
+        )
 
     def _on_card_toggled(self, title: str, expanded: bool):
         state = "expanded" if expanded else "collapsed"
