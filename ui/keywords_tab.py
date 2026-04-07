@@ -1026,6 +1026,14 @@ Output rules:
         
         vol_menu = menu.addMenu("Volume Data")
         vol_menu.addAction("Import search volume data").triggered.connect(self.open_import_volume_dialog)
+
+        hashtags_menu = menu.addMenu("Hashtags")
+        hashtags_menu.addAction("Copy SELECTED keywords as hashtags").triggered.connect(
+            lambda: self.copy_keywords_as_hashtags(selected_only=True)
+        )
+        hashtags_menu.addAction("Copy ALL keywords as hashtags").triggered.connect(
+            lambda: self.copy_keywords_as_hashtags(selected_only=False)
+        )
         
         search_menu = menu.addMenu("Search")
         item = self.table.itemAt(position)
@@ -1052,6 +1060,65 @@ Output rules:
 
     def send_to_video(self): self._send_to_tool("video")
     def send_to_channel(self): self._send_to_tool("channel")
+
+    def _selected_keyword_rows(self):
+        checked_rows = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                checked_rows.append(row)
+        if checked_rows:
+            return checked_rows
+        if self.table.selectionModel() is None:
+            return []
+        return sorted({index.row() for index in self.table.selectionModel().selectedRows()})
+
+    def _keyword_texts_for_rows(self, rows):
+        keywords = []
+        for row in rows:
+            item = self.table.item(row, 5)
+            if item is None:
+                continue
+            text = item.text().strip()
+            if text:
+                keywords.append(text)
+        return keywords
+
+    @staticmethod
+    def _keyword_to_hashtag(keyword):
+        compact = re.sub(r"[^\w]+", "", str(keyword or "").strip(), flags=re.UNICODE)
+        compact = compact.strip("_")
+        if not compact:
+            return ""
+        return f"#{compact}"
+
+    def copy_keywords_as_hashtags(self, selected_only):
+        rows = self._selected_keyword_rows() if selected_only else list(range(self.table.rowCount()))
+        keywords = self._keyword_texts_for_rows(rows)
+        if not keywords:
+            message = "Please select at least one keyword." if selected_only else "No keywords to copy."
+            QMessageBox.warning(self, "Hashtags", message)
+            return
+
+        hashtags = []
+        seen = set()
+        for keyword in keywords:
+            hashtag = self._keyword_to_hashtag(keyword)
+            if not hashtag:
+                continue
+            lowered = hashtag.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            hashtags.append(hashtag)
+
+        if not hashtags:
+            QMessageBox.warning(self, "Hashtags", "No valid hashtags could be created.")
+            return
+
+        QApplication.clipboard().setText("\n".join(hashtags))
+        QMessageBox.information(self, "Hashtags", f"Copied {len(hashtags)} hashtag(s).")
+
     def _send_to_tool(self, target):
         keywords = []
         has_sel = any(self.table.item(r,0).checkState()==Qt.CheckState.Checked for r in range(self.table.rowCount()) if self.table.item(r,0))

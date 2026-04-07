@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from core.rpm_data import ChannelRecord, build_sample_channels
 from core.rpm_service import RPMFilterState, RPMFinderService, categories_from_channels
@@ -19,16 +18,13 @@ class RPMFinderPage(QWidget):
         self.filter_state = RPMFilterState()
         self.current_search_mode = "Keyword"
 
-        root = QHBoxLayout(self)
+        root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.sidebar = self._build_sidebar()
-        root.addWidget(self.sidebar)
-
         main_wrap = QWidget()
         main_layout = QVBoxLayout(main_wrap)
-        main_layout.setContentsMargins(28, 24, 28, 24)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(18)
 
         topbar = self._build_topbar()
@@ -62,19 +58,6 @@ class RPMFinderPage(QWidget):
 
         root.addWidget(main_wrap, 1)
         self._render_results(self.service.all_channels())
-
-    def _build_sidebar(self):
-        frame = QFrame(); frame.setObjectName("sidebar"); frame.setFixedWidth(104)
-        layout = QVBoxLayout(frame); layout.setContentsMargins(18, 16, 18, 16); layout.setSpacing(8)
-        logo = QLabel("nex\nLev"); logo.setObjectName("sidebar_logo"); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(logo)
-        sidebar_items = [("AI Niche Finder", True), ("Dashboard", False), ("Keywords", False), ("Custom Keywords", False), ("Channels", False), ("Saved", False), ("RPM Predictor", False), ("NexLev AI", False)]
-        for text, active in sidebar_items:
-            btn = QToolButton(); btn.setObjectName("sidebar_btn"); btn.setProperty("active", active); btn.setText(text); btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            layout.addWidget(btn)
-            btn.style().unpolish(btn); btn.style().polish(btn)
-        layout.addStretch()
-        return frame
 
     def _build_topbar(self):
         container = QFrame()

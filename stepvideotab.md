@@ -519,12 +519,17 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
   - popup `Video Title Generator` gom:
     - input keyword/topic
     - dropdown so luong title (10/20/30/50)
+    - dropdown chon AI model Gemini
     - nut `Generate`
+    - nut `AI Generate`
     - table cot: checkbox, title, word count, character count, controls
     - controls moi dong: `Copy | Youtube | Google`
-    - footer: `File`, `Filters`, `Clear`, `Total`
+    - footer: `File`, `Filters`, `Clear`, `Total`, `Status`
 - Logic:
   - tao title ngau nhien theo template, tranh trung lap.
+  - AI generator dung Gemini qua `.env` / `utils.config`.
+  - AI chay tren worker nen, khong block dialog.
+  - neu AI loi hoac khong lay du data thi fallback local titles.
   - `Copy` copy title vao clipboard.
   - `Youtube` / `Google` mo tab tim kiem title.
   - `File` ho tro save CSV/TXT va copy all.
@@ -533,8 +538,34 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 - Test:
   - mo `Tools -> Video Title Generator Tool` thanh cong.
   - generate 10/20/30/50 title thanh cong.
+  - `AI Generate` hoat dong khi co `GEMINI_API_KEY`.
+  - khi AI loi -> fallback local van render du danh sach.
   - copy/open/search/save/filter hoat dong.
-  - compile/import pass: `ui/videos_tab.py`, `ui/video_title_generator_dialog.py`.
+  - compile/import pass: `core/video_title_generator.py`, `ui/videos_tab.py`, `ui/video_title_generator_dialog.py`.
+
+### SV-32 - Content Spinner tool (Tools menu)
+- UI:
+  - `Tools -> Content Spinner Tool` mo popup rieng.
+  - popup gom:
+    - spin mode
+    - strength
+    - checkbox giu nghia / tranh lap / giu keyword
+    - nut nap nhanh `Use Title`, `Use Description`, `Use Title + Description`
+    - o `Source content`
+    - o `Spun result`
+    - nut `Preview`, `Spin Content`, `Copy`, `Send to Title`, `Send to Description`, `Clear`, `Close`
+- Logic:
+  - neu co row duoc chon trong Videos table thi lay `Title` va `Description` cua row dau tien de nap vao tool.
+  - spin bang engine local `core/video_to_text_spinner.py`.
+  - co the copy ket qua spun.
+  - co the ap ket qua spun nguoc lai vao cot `Title` hoac `Description` cua row dang chon.
+  - cap nhat ca table UI va `_all_rows_cache`.
+- Test:
+  - mo tool thanh cong khi co row selected va khi khong co row selected.
+  - `Use Title` / `Use Description` / `Use Title + Description` hoat dong.
+  - `Preview` / `Spin Content` tao ket qua spun.
+  - `Send to Title` / `Send to Description` cap nhat row da chon trong table.
+  - compile/import pass: `ui/videos_tab.py`, `ui/content_spinner_tool_dialog.py`.
 
 ## 7) Checklist test manual (dung lai moi lan)
 - [ ] Search phrase rong -> canh bao.
@@ -565,6 +596,7 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 | Download thumbnails | `22 tube-atlas-download-video-thumbnails` | done/doing/todo | SV-27 | |
 | Analyze titles | `11 tube-atlas-analyze-titles` | done/doing/todo | SV-28 | |
 | Video title generator | Tube Atlas videos tool menu + generator popup | done/doing/todo | SV-31 | |
+| Content spinner | Tube Atlas videos tool menu | done/doing/todo | SV-32 | |
 
 ## 9) Quy dinh truoc khi sang step tiep
 - Neu step hien tai chua PASS UI + PASS logic + PASS test + co SCR -> khong qua step moi.

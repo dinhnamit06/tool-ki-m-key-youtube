@@ -19,21 +19,23 @@ class MetricTile(QFrame):
         layout.setSpacing(4)
 
         title_label = QLabel(title)
-        title_label.setStyleSheet("color:#e8fbff; font-size:12px;")
+        title_label.setStyleSheet("color:#e8fbff; font-size:11px;")
         layout.addWidget(title_label)
 
         value_label = QLabel(value)
-        value_label.setStyleSheet("color:#ffffff; font-size:26px; font-weight:800;")
+        value_label.setStyleSheet("color:#ffffff; font-size:19px; font-weight:800;")
+        value_label.setWordWrap(True)
         layout.addWidget(value_label)
 
 
 class ChannelCard(QFrame):
     toggled = pyqtSignal(str, bool)
 
-    def __init__(self, channel: ChannelRecord):
+    def __init__(self, channel: ChannelRecord, start_expanded: bool | None = None):
         super().__init__()
         self.setObjectName("channel_card")
         self.channel = channel
+        initial_expanded = channel.revealed if start_expanded is None else bool(start_expanded)
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(14)
@@ -74,9 +76,9 @@ class ChannelCard(QFrame):
         header.addLayout(title_wrap, 1)
 
         self.btn_expand = QToolButton()
-        self.btn_expand.setText("Collapse" if channel.revealed else "Expand")
+        self.btn_expand.setText("Collapse" if initial_expanded else "Expand")
         self.btn_expand.setCheckable(True)
-        self.btn_expand.setChecked(channel.revealed)
+        self.btn_expand.setChecked(initial_expanded)
         self.btn_expand.clicked.connect(self._toggle_expanded)
         header.addWidget(self.btn_expand, alignment=Qt.AlignmentFlag.AlignTop)
         root.addLayout(header)
@@ -117,7 +119,8 @@ class ChannelCard(QFrame):
         detail_layout.addLayout(sub)
 
         root.addWidget(self.detail_panel)
-        self.detail_panel.setVisible(channel.revealed)
+        self.detail_panel.setVisible(initial_expanded)
+        self.channel.revealed = initial_expanded
 
     def _toggle_expanded(self):
         expanded = self.btn_expand.isChecked()

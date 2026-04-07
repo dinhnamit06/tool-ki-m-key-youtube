@@ -25,15 +25,15 @@ Status: done
 Status: done
 
 ## RPM-04
-- Filter templates popup
-Status: pending
+- Channels page voi filter sidebar co dinh
+Status: done
 
 ## RPM-05
-- Save/load filter templates
+- Filter template box va UI template
 Status: pending
 
 ## RPM-06
-- Channel detail table mode
+- Save/load filter templates
 Status: pending
 
 ## RPM-07
@@ -41,13 +41,17 @@ Status: pending
 Status: pending
 
 ## RPM-08
-- Browser login / session shell
+- RPM Predictor page
 Status: pending
 
 ## RPM-09
-- Import/export project package
+- Browser login / session shell
 Status: pending
 
 ## RPM-10
+- Import/export project package
+Status: pending
+
+## RPM-11
 - Hardening pass
 Status: pending

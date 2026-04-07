@@ -46,6 +46,7 @@ from core.videos_fetcher import (
     VideoSearchWorker,
     fetch_video_page_details,
 )
+from ui.content_spinner_tool_dialog import VideosContentSpinnerDialog
 from ui.video_title_generator_dialog import VideoTitleGeneratorDialog
 from utils.constants import REQUESTS_INSTALLED, TABLE_SCROLLBAR_STYLE
 
@@ -1280,9 +1281,15 @@ class AnalyzeVideoTitleKeywordsDialog(QDialog):
         self.lbl_total.setText(f"Total: {len(filtered_rows):,}")
 
     def closeEvent(self, event):
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(1000)
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.stop()
+                    worker.wait(1000)
+            except Exception:
+                pass
         super().closeEvent(event)
 
 
@@ -1834,6 +1841,9 @@ class BrowseAndExtractDialog(QDialog):
             self._browser_view = self._webengine_view_class()
             self._browser_view.urlChanged.connect(self._on_browser_url_changed)
             self._browser_view.loadFinished.connect(self._on_browser_load_finished)
+            browser_page = self._browser_view.page()
+            if hasattr(browser_page, "fullScreenRequested"):
+                browser_page.fullScreenRequested.connect(self._on_browser_fullscreen_requested)
             self.browser_stack.addWidget(self._browser_view)
             self.browser_stack.setCurrentWidget(self._browser_view)
             self._extract_scan_timer.start()
@@ -1842,6 +1852,13 @@ class BrowseAndExtractDialog(QDialog):
             self._browser_view = None
             self.browser_content.append(f"\n\nFailed to create embedded browser:\n{exc}")
             return False
+
+    def _on_browser_fullscreen_requested(self, request):
+        try:
+            if hasattr(request, "reject"):
+                request.reject()
+        except Exception:
+            pass
 
     def _navigate_to_input_url(self):
         target_url = self._normalize_browser_url(self.input_browser_url.text())
@@ -2540,6 +2557,7 @@ class VideosTab(QWidget):
             "Description": "",
             "Thumbnail URL": "",
             "Rating": "not-given",
+            "Likes": "not-given",
             "Comments": "not-given",
             "View Count": "not-given",
             "Length Seconds": "not-given",
@@ -2672,7 +2690,7 @@ class VideosTab(QWidget):
         act_ke = menu.addAction("Keywords Everywhere Tool")
         act_download = menu.addAction("Download Youtube Video Tool")
 
-        act_spinner.triggered.connect(lambda: self._show_coming_soon("Content Spinner Tool"))
+        act_spinner.triggered.connect(self._open_content_spinner_tool)
         act_title_generator.triggered.connect(self._open_video_title_generator_tool)
         act_ke.triggered.connect(lambda: self._show_coming_soon("Keywords Everywhere Tool"))
         act_download.triggered.connect(lambda: self._show_coming_soon("Download Youtube Video Tool"))
@@ -2683,6 +2701,57 @@ class VideosTab(QWidget):
         seed_keyword = self.input_search_phrase.text().strip()
         dlg = VideoTitleGeneratorDialog(self, initial_keyword=seed_keyword)
         dlg.exec()
+
+    def _open_content_spinner_tool(self):
+        selected_rows = self._effective_selected_rows()
+        payload = self._row_payload(selected_rows[0]) if selected_rows else {}
+        title_text = str(payload.get("Title", "")).strip()
+        description_text = str(payload.get("Description", "")).strip()
+
+        source_label = "No video selected. Manual spinner mode is active."
+        if selected_rows:
+            video_title = title_text or "(No title)"
+            source_label = f"Loaded from selected video: {video_title}"
+            if len(selected_rows) > 1:
+                source_label += f" | using first selected row ({selected_rows[0] + 1})"
+
+        dlg = VideosContentSpinnerDialog(
+            self,
+            source_title=title_text,
+            source_description=description_text,
+            source_label=source_label,
+            apply_callback=(
+                (lambda target_field, text: self._apply_spinner_result_to_row(selected_rows[0], target_field, text))
+                if selected_rows
+                else None
+            ),
+        )
+        dlg.exec()
+
+    def _apply_spinner_result_to_row(self, row, target_field, text):
+        if row < 0 or row >= self.videos_table.rowCount():
+            QMessageBox.warning(self, "Videos Tool", "The selected row is no longer available.")
+            return
+
+        target_field = str(target_field or "").strip()
+        if target_field not in {"Title", "Description"}:
+            QMessageBox.warning(self, "Videos Tool", f"Unsupported target field: {target_field}")
+            return
+
+        clean_text = str(text or "").strip()
+        self._set_table_text_item(row, target_field, clean_text)
+
+        row_data = self._row_payload(row)
+        video_link = str(row_data.get("Video Link", "")).strip()
+        video_id = str(row_data.get("Video ID", "")).strip()
+        for item in self._all_rows_cache:
+            same_link = video_link and str(item.get("Video Link", "")).strip() == video_link
+            same_id = video_id and str(item.get("Video ID", "")).strip() == video_id
+            if same_link or same_id:
+                item[target_field] = clean_text
+                break
+
+        self._set_status(f"Updated {target_field.lower()} for row {row + 1}.")
 
     def _build_left_panel(self):
         panel = QFrame()
@@ -3835,6 +3904,16 @@ class VideosTab(QWidget):
             col = VIDEO_COLUMN_INDEX[column_name]
             item = self.videos_table.item(row, col)
             payload[column_name] = item.text().strip() if item is not None else ""
+        video_id = str(payload.get("Video ID", "")).strip()
+        video_link = str(payload.get("Video Link", "")).strip()
+        for cached in self._all_rows_cache:
+            cached_id = str(cached.get("Video ID", "")).strip()
+            cached_link = str(cached.get("Video Link", "")).strip()
+            if (video_id and cached_id == video_id) or (video_link and cached_link == video_link):
+                for key in ("Likes", "Comments", "Subscribers", "Tags", "Rating"):
+                    if key in cached and str(cached.get(key, "")).strip():
+                        payload[key] = str(cached.get(key, "")).strip()
+                break
         return payload
 
     def _collect_video_payloads(self, rows):
@@ -3922,6 +4001,7 @@ class VideosTab(QWidget):
         worker = VideoTagsAnalyzeWorker(rows)
         worker.progress_signal.connect(dlg.set_progress)
         worker.finished_signal.connect(dlg.populate_rows)
+        worker.finished.connect(lambda: setattr(dlg, "_worker", None))
         worker.finished.connect(worker.deleteLater)
         dlg._worker = worker
         worker.start()
@@ -4707,7 +4787,7 @@ class VideosTab(QWidget):
 
     def _collect_current_rows_for_tag_analysis(self):
         rows = []
-        wanted_keys = {"Channel", "Tags", "View Count"}
+        wanted_keys = {"Channel", "Tags", "View Count", "Likes"}
         for row in range(self.videos_table.rowCount()):
             payload = self._row_payload(row)
             if not payload:

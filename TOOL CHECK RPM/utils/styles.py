@@ -29,6 +29,20 @@ QFrame#channel_card {
     border: 1px solid #dbe3ee;
     border-radius: 18px;
 }
+QGroupBox {
+    background-color: #ffffff;
+    border: 1px solid #dbe3ee;
+    border-radius: 12px;
+    margin-top: 8px;
+    padding-top: 8px;
+    font-weight: 700;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    color: #18202a;
+}
 QLabel#app_title {
     color: #18202a;
     font-size: 20px;
@@ -55,7 +69,7 @@ QToolButton#sidebar_btn {
     padding: 8px 10px;
     text-align: left;
     border-radius: 10px;
-    font-size: 13px;
+    font-size: 12px;
 }
 QToolButton#sidebar_btn:hover {
     background-color: #eaf0f8;

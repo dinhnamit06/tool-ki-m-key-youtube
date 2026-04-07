@@ -99,12 +99,47 @@ tham chieu tu video NexLev ma khong lam lon logic cua tool YTB chinh.
 - monetized
 - shorts
 
+## 4.5 Pham vi V1 da chot lai sau khi mo xe ky hon
+- V1 chi cover:
+  - `AI Niche Finder overview`
+  - top search/filter
+  - popup advanced filters
+  - channel cards + expanded metrics
+- V1 KHONG co gang clone ngay:
+  - `Channels page` voi filter sidebar co dinh
+  - `RPM Predictor` page
+  - `NexLev AI`
+  - browser auth/session flow
+
+## 4.6 Man hinh future da xac nhan can tach rieng
+
+### Channels page
+- layout 2 cot:
+  - trai: filter sidebar co dinh + filter template
+  - phai: cards/results
+
+### RPM Predictor page
+- layout rieng theo channel search
+- nhap ten channel
+- nut `Get RPM`
+- hien output predictor
+
+### NexLev AI page
+- chat/query style UI
+- go prompt tren scraped data
+
 ## 5) Trang thai hien tai
 - V1 shell da co.
 - Dataset dang la `sample local data`.
+- App da duoc refactor thanh `shared shell + sidebar + stacked pages`.
+- Da co:
+  - `AI Niche Finder overview`
+  - `Channels page` voi filter sidebar co dinh
 - Chua co:
   - browser login / scraping NexLev
   - template filter
+  - rpm predictor page
+  - nexlev ai page
   - advanced mode
   - export/import
   - persistence
@@ -124,8 +159,8 @@ tham chieu tu video NexLev ma khong lam lon logic cua tool YTB chinh.
 ## 7) Huong di tiep
 - Lam tung step nho giong tool YTB.
 - Sau V1 shell:
-  1. popup `Filter template`
+  1. `Filter template` UI cho channels page
   2. luu/nap template
-  3. sort headers
-  4. channel detail popup/table mode
+  3. sort/ranking controls
+  4. `RPM Predictor` page
   5. browser login flow neu can

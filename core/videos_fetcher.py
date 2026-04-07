@@ -52,6 +52,7 @@ def _http_get(url: str, *, params=None, headers=None, timeout=25, proxy_url: str
 def _default_video_row() -> Dict[str, str]:
     return {
         "Rating": "not-given",
+        "Likes": "not-given",
         "Comments": "not-given",
         "View Count": "not-given",
         "Length Seconds": "not-given",
@@ -263,6 +264,7 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
             "Category": category,
             "Thumbnail URL": thumb_url,
             "Rating": average_rating or "not-given",
+            "Likes": "not-given",
             "Comments": normalized_comments,
             "Published": publish_exact or "not-given",
             "Published Age (Days)": str(age_days) if age_days > 0 else "not-given",
@@ -288,6 +290,9 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_link or f"https://www.youtube.com/watch?v={video_key}", download=False)
             if info:
+                like_count = info.get("like_count")
+                if like_count is not None and details.get("Likes", "not-given") == "not-given":
+                    details["Likes"] = f"{int(like_count):,}"
                 comment_count = info.get("comment_count")
                 if comment_count is not None and details.get("Comments", "not-given") == "not-given":
                     details["Comments"] = f"{int(comment_count):,}"

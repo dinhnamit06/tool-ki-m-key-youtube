@@ -1,10 +1,9 @@
 import csv
-import random
 import re
 import webbrowser
 from urllib.parse import quote_plus
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -24,6 +23,30 @@ from PyQt6.QtWidgets import (
     QMenu,
 )
 
+from core.video_title_generator import build_local_titles, generate_ai_titles
+
+
+class VideoTitleGeneratorWorker(QThread):
+    finished_signal = pyqtSignal(list, str)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, keyword_text, target_count, model_name):
+        super().__init__()
+        self.keyword_text = str(keyword_text or "").strip()
+        self.target_count = int(target_count)
+        self.model_name = str(model_name or "").strip() or "gemini-2.5-flash-lite"
+
+    def run(self):
+        try:
+            titles = generate_ai_titles(
+                self.keyword_text,
+                self.target_count,
+                model_name=self.model_name,
+            )
+            self.finished_signal.emit(titles, f"AI generated {len(titles)} titles.")
+        except Exception as exc:
+            self.error_signal.emit(str(exc))
+
 
 class VideoTitleGeneratorDialog(QDialog):
     def __init__(self, parent=None, initial_keyword=""):
@@ -32,6 +55,8 @@ class VideoTitleGeneratorDialog(QDialog):
         self.resize(1180, 660)
         self._all_titles = []
         self._filtered_keyword = ""
+        self._worker = None
+        self._model_value_by_label = {}
         self._setup_ui(initial_keyword=initial_keyword)
 
     def _setup_ui(self, initial_keyword):
@@ -58,14 +83,26 @@ class VideoTitleGeneratorDialog(QDialog):
         self.combo_count.setMinimumWidth(160)
         top.addWidget(self.combo_count)
 
+        top.addWidget(QLabel("AI model:"))
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumWidth(170)
+        self._setup_gemini_model_choices()
+        top.addWidget(self.model_combo)
+
         self.btn_generate = QPushButton("Generate")
+        self.btn_generate_ai = QPushButton("AI Generate")
         self.btn_generate.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_generate.setStyleSheet(
+        self.btn_generate_ai.setCursor(Qt.CursorShape.PointingHandCursor)
+        button_style = (
             "QPushButton { background:#e50914; color:#ffffff; border:none; border-radius:4px; padding:6px 14px; font-weight:700; }"
             "QPushButton:hover { background:#ff1a25; }"
         )
+        self.btn_generate.setStyleSheet(button_style)
+        self.btn_generate_ai.setStyleSheet(button_style)
         self.btn_generate.clicked.connect(self.generate_titles)
+        self.btn_generate_ai.clicked.connect(self.generate_titles_ai)
         top.addWidget(self.btn_generate)
+        top.addWidget(self.btn_generate_ai)
 
         root.addLayout(top)
 
@@ -98,6 +135,9 @@ class VideoTitleGeneratorDialog(QDialog):
         bottom.setSpacing(8)
         self.lbl_total = QLabel("Total: 0")
         bottom.addWidget(self.lbl_total)
+        self.lbl_status = QLabel("Mode: Local templates or AI Gemini")
+        self.lbl_status.setStyleSheet("QLabel { color:#555555; }")
+        bottom.addWidget(self.lbl_status)
         bottom.addStretch()
 
         self.btn_file = QPushButton("File")
@@ -140,6 +180,33 @@ class VideoTitleGeneratorDialog(QDialog):
         act_copy.triggered.connect(self.copy_all_titles)
         self.btn_file.setMenu(menu)
 
+    def _setup_gemini_model_choices(self):
+        options = [
+            ("Gemini 2.5 Flash Lite", "gemini-2.5-flash-lite"),
+            ("Gemini 2.5 Flash", "gemini-2.5-flash"),
+        ]
+        self._model_value_by_label = {label: value for label, value in options}
+        self.model_combo.clear()
+        for label, _ in options:
+            self.model_combo.addItem(label)
+        self.model_combo.setCurrentIndex(0)
+
+    def _selected_model_value(self):
+        return self._model_value_by_label.get(self.model_combo.currentText().strip(), "gemini-2.5-flash-lite")
+
+    def _set_busy_state(self, busy, message=""):
+        self.btn_generate.setEnabled(not busy)
+        self.btn_generate_ai.setEnabled(not busy)
+        self.input_keywords.setEnabled(not busy)
+        self.combo_count.setEnabled(not busy)
+        self.model_combo.setEnabled(not busy)
+        if busy:
+            self.btn_generate_ai.setText("Generating...")
+        else:
+            self.btn_generate_ai.setText("AI Generate")
+        if message:
+            self.lbl_status.setText(message)
+
     @staticmethod
     def _word_count(text):
         return len([w for w in re.split(r"\s+", str(text).strip()) if w])
@@ -155,84 +222,58 @@ class VideoTitleGeneratorDialog(QDialog):
             QMessageBox.warning(self, "Video Title Generator", "Please enter at least one keyword.")
             return
         count = self._target_count()
-        titles = self._build_titles(keyword_text, count)
+        titles = build_local_titles(keyword_text, count)
         self._all_titles = titles
         self._filtered_keyword = ""
         self._render_titles(titles)
+        self.lbl_status.setText(f"Local generator created {len(titles)} titles.")
+
+    def generate_titles_ai(self):
+        keyword_text = self.input_keywords.text().strip()
+        if not keyword_text:
+            QMessageBox.warning(self, "Video Title Generator", "Please enter at least one keyword.")
+            return
+        if self._worker is not None and self._worker.isRunning():
+            QMessageBox.information(self, "Video Title Generator", "AI generation is already running.")
+            return
+
+        count = self._target_count()
+        model_name = self._selected_model_value()
+        self._set_busy_state(True, f"Generating AI titles with {model_name}...")
+        self._worker = VideoTitleGeneratorWorker(keyword_text, count, model_name)
+        self._worker.finished_signal.connect(self._on_ai_titles_ready)
+        self._worker.error_signal.connect(self._on_ai_titles_error)
+        self._worker.finished.connect(self._on_ai_worker_finished)
+        self._worker.start()
 
     def _build_titles(self, keyword_text, target_count):
-        topic = re.sub(r"\s+", " ", keyword_text).strip()
-        if not topic:
-            return []
-        variants = [part.strip() for part in re.split(r"[,;/|]+", topic) if part.strip()]
-        primary = variants[0] if variants else topic
-        secondary = variants[1] if len(variants) > 1 else primary
+        return build_local_titles(keyword_text, target_count)
 
-        numbers = [3, 5, 7, 9, 10, 12, 15]
-        hooks = [
-            "Beginners Need to Know",
-            "That Actually Works",
-            "Most People Ignore",
-            "You Can Try Today",
-            "Without Wasting Time",
-            "For Fast Results",
-            "Step by Step",
-            "Like a Pro",
-        ]
-        templates = [
-            "Breaking News: {topic}",
-            "{n} {topic} Tips That Actually Work",
-            "{n} Mistakes to Avoid in {topic}",
-            "How to Start {topic} for Beginners",
-            "The Ultimate {topic} Guide ({n} Steps)",
-            "{n} Secrets of {topic} You Should Know",
-            "Why Your {topic} Is Not Working ({n} Fixes)",
-            "Top {n} {topic} Ideas for This Year",
-            "{topic} vs {secondary}: Which One Is Better?",
-            "I Tried {topic} for {n} Days - Here's What Happened",
-            "{n} Proven Ways to Improve {topic}",
-            "How to Master {topic} in {n} Simple Steps",
-            "Stop Doing This in {topic} ({n} Big Mistakes)",
-            "{n} Powerful {topic} Hacks for Beginners",
-            "{topic}: {hook}",
-            "The Truth About {topic} ({n} Things Nobody Tells You)",
-            "{n} Smart {topic} Strategies to Grow Faster",
-            "Can You Really Improve {topic}? ({n} Real Tips)",
-            "{n} Best Tools for {topic}",
-            "How to Get Better at {topic} Without Stress",
-        ]
+    def _on_ai_titles_ready(self, titles, message):
+        self._all_titles = list(titles or [])
+        self._filtered_keyword = ""
+        self._render_titles(self._all_titles)
+        self.lbl_status.setText(str(message or f"AI generated {len(self._all_titles)} titles."))
 
-        rng = random.Random()
-        titles = []
-        seen = set()
-        max_attempts = max(80, target_count * 20)
-        for _ in range(max_attempts):
-            tpl = rng.choice(templates)
-            title = tpl.format(
-                topic=primary,
-                secondary=secondary,
-                n=rng.choice(numbers),
-                hook=rng.choice(hooks),
-            )
-            title = re.sub(r"\s+", " ", title).strip(" -")
-            key = title.lower()
-            if not title or key in seen:
-                continue
-            seen.add(key)
-            titles.append(title)
-            if len(titles) >= target_count:
-                break
+    def _on_ai_titles_error(self, error_message):
+        keyword_text = self.input_keywords.text().strip()
+        count = self._target_count()
+        fallback_titles = build_local_titles(keyword_text, count)
+        self._all_titles = fallback_titles
+        self._filtered_keyword = ""
+        self._render_titles(fallback_titles)
+        self.lbl_status.setText("AI failed. Fallback local titles loaded.")
+        QMessageBox.warning(
+            self,
+            "Video Title Generator",
+            f"AI title generation failed:\n{error_message}\n\nLoaded local fallback titles instead.",
+        )
 
-        if len(titles) < target_count:
-            base = primary
-            idx = 1
-            while len(titles) < target_count:
-                fallback = f"{idx} Ways to Improve {base}"
-                if fallback.lower() not in seen:
-                    seen.add(fallback.lower())
-                    titles.append(fallback)
-                idx += 1
-        return titles
+    def _on_ai_worker_finished(self):
+        self._set_busy_state(False)
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
 
     def _render_titles(self, titles):
         self.table.setRowCount(0)
@@ -313,6 +354,7 @@ class VideoTitleGeneratorDialog(QDialog):
         self._all_titles = []
         self._filtered_keyword = ""
         self.lbl_total.setText("Total: 0")
+        self.lbl_status.setText("Cleared.")
 
     def open_filter_dialog(self):
         if not self._all_titles:
@@ -379,4 +421,3 @@ class VideoTitleGeneratorDialog(QDialog):
             QMessageBox.information(self, "Video Title Generator", f"Saved to:\n{path}")
         except Exception as exc:
             QMessageBox.warning(self, "Video Title Generator", f"Save failed:\n{exc}")
-
