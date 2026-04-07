@@ -35,6 +35,7 @@ import os
 import webbrowser
 import re
 from collections import Counter
+from datetime import datetime
 from html import unescape
 from urllib.parse import parse_qs, urlparse, urljoin
 
@@ -66,12 +67,16 @@ VIDEO_TABLE_COLUMNS = [
     "Title",
     "Description",
     "Rating",
+    "Likes",
     "Comments",
     "View Count",
     "Length Seconds",
     "Published",
     "Published Age (Days)",
     "Avg. Views per Day",
+    "Est. Video Earnings",
+    "Est. Earnings Per Day",
+    "Email",
     "Category",
     "Subtitles",
     "Channel",
@@ -92,26 +97,33 @@ VIDEO_DEFAULT_COLUMN_WIDTHS = {
     6: 300,
     7: 240,
     8: 82,
-    9: 100,
-    10: 118,
-    11: 110,
-    12: 120,
-    13: 130,
-    14: 138,
-    15: 120,
-    16: 86,
-    17: 180,
-    18: 210,
-    19: 110,
-    20: 260,
+    9: 96,
+    10: 100,
+    11: 118,
+    12: 110,
+    13: 120,
+    14: 130,
+    15: 138,
+    16: 150,
+    17: 150,
+    18: 170,
+    19: 120,
+    20: 86,
+    21: 180,
+    22: 210,
+    23: 110,
+    24: 260,
 }
 VIDEO_NUMERIC_FILTERABLE_COLUMNS = {
     "Rating",
+    "Likes",
     "Comments",
     "View Count",
     "Length Seconds",
     "Published Age (Days)",
     "Avg. Views per Day",
+    "Est. Video Earnings",
+    "Est. Earnings Per Day",
     "Subscribers",
 }
 
@@ -2508,6 +2520,8 @@ class VideosTab(QWidget):
         self._all_rows_cache = []
         self._active_filter = self._default_filter_state()
         self._default_column_widths = dict(VIDEO_DEFAULT_COLUMN_WIDTHS)
+        self._sort_column_name = ""
+        self._sort_descending = True
         self._table_search_dialog = None
         self._search_hits = []
         self._search_hit_index = -1
@@ -2564,6 +2578,9 @@ class VideosTab(QWidget):
             "Published": "not-given",
             "Published Age (Days)": "not-given",
             "Avg. Views per Day": "not-given",
+            "Est. Video Earnings": "not-given",
+            "Est. Earnings Per Day": "not-given",
+            "Email": "not-given",
             "Category": "not-given",
             "Subtitles": "not-given",
             "Channel": "",
@@ -2979,6 +2996,8 @@ class VideosTab(QWidget):
 
         for col, width in self._default_column_widths.items():
             self.videos_table.setColumnWidth(col, width)
+
+        self._refresh_videos_header_labels()
 
         v.addWidget(self.videos_table, stretch=1)
 
@@ -3704,42 +3723,77 @@ class VideosTab(QWidget):
             if column_name in VIDEO_NUMERIC_FILTERABLE_COLUMNS:
                 current_expr = str(self._active_filter.get("numeric", {}).get(column_name, "")).strip()
                 if current_expr:
-                    item.setToolTip(f"Active filter: {current_expr}")
+                    item.setToolTip(f"Active filter: {current_expr} | Click to sort this column.")
                 else:
-                    item.setToolTip("Click to filter this numeric column. Examples: >500000, >=1000, <60, =0")
+                    item.setToolTip("Click to sort this column. Use Filters for numeric filtering.")
             else:
-                item.setToolTip("")
+                item.setToolTip("Click to sort this column." if column_name not in {"", "Image"} else "")
+
+    def _refresh_videos_header_labels(self):
+        for index, column_name in enumerate(VIDEO_TABLE_COLUMNS):
+            item = self.videos_table.horizontalHeaderItem(index)
+            if item is None:
+                continue
+            if column_name in {"", "Image"}:
+                item.setText(column_name)
+                continue
+            label = column_name
+            if column_name == self._sort_column_name:
+                label = f"{column_name} {'▼' if self._sort_descending else '▲'}"
+            item.setText(label)
+
+    def _sort_value_for_column(self, row_dict, column_name):
+        raw_value = str((row_dict or {}).get(column_name, "")).strip()
+        if not raw_value or raw_value.lower() in {"not-given", "n/a", "none", "-"}:
+            return None
+
+        if column_name == "Published":
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(raw_value, fmt)
+                except Exception:
+                    continue
+            return raw_value.lower()
+
+        if column_name in VIDEO_NUMERIC_FILTERABLE_COLUMNS:
+            return self._parse_numeric_value(raw_value)
+
+        return raw_value.lower()
+
+    def _sort_all_rows_cache(self):
+        column_name = str(self._sort_column_name or "").strip()
+        if not column_name or column_name not in VIDEO_COLUMN_INDEX:
+            return
+
+        sortable = []
+        missing = []
+        for row_dict in self._all_rows_cache:
+            value = self._sort_value_for_column(row_dict, column_name)
+            if value is None:
+                missing.append(row_dict)
+                continue
+            sortable.append((value, row_dict))
+
+        sortable.sort(key=lambda item: item[0], reverse=self._sort_descending)
+        self._all_rows_cache = [row for _, row in sortable] + list(missing)
 
     def _on_header_section_clicked(self, section):
         if section < 0 or section >= len(VIDEO_TABLE_COLUMNS):
             return
         column_name = VIDEO_TABLE_COLUMNS[section]
-        if column_name not in VIDEO_NUMERIC_FILTERABLE_COLUMNS:
+        if column_name in {"", "Image"}:
             return
-
-        current_expr = str(self._active_filter.get("numeric", {}).get(column_name, "")).strip()
-        dlg = VideoNumericFilterDialog(self, column_name=column_name, current_expression=current_expr)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        expression = dlg.selected_expression()
-        next_numeric = dict(self._active_filter.get("numeric", {}) or {})
-        if expression is None or not str(expression).strip():
-            next_numeric.pop(column_name, None)
+        if self._sort_column_name == column_name:
+            self._sort_descending = not self._sort_descending
         else:
-            probe = self._evaluate_numeric_expression(1.0, expression)
-            if probe is None:
-                QMessageBox.warning(
-                    self,
-                    "Videos Tool",
-                    "Numeric filter format is invalid. Use examples like >500000, >=1000, <60, =0.",
-                )
-                return
-            next_numeric[column_name] = str(expression).strip()
+            self._sort_column_name = column_name
+            self._sort_descending = True
 
-        self._active_filter["numeric"] = next_numeric
-        self._refresh_header_filter_tooltips()
+        self._sort_all_rows_cache()
+        self._refresh_videos_header_labels()
         self._rebuild_table_from_cache()
+        direction = "descending" if self._sort_descending else "ascending"
+        self._set_status(f"Sorted by {column_name} ({direction}).")
 
     def auto_fit_column_widths(self):
         if self.videos_table.columnCount() == 0:

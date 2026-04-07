@@ -59,6 +59,9 @@ def _default_video_row() -> Dict[str, str]:
         "Published": "not-given",
         "Published Age (Days)": "not-given",
         "Avg. Views per Day": "not-given",
+        "Est. Video Earnings": "not-given",
+        "Est. Earnings Per Day": "not-given",
+        "Email": "not-given",
         "Category": "not-given",
         "Subtitles": "not-given",
         "Channel": "",
@@ -96,6 +99,58 @@ def _normalize_numeric_label(text: str, default: str = "not-given") -> str:
         has_suffix = True
     value = int(number * multiplier)
     return f"{value:,}+" if has_suffix else f"{value:,}"
+
+
+def _parse_int_value(raw_value) -> int:
+    text = str(raw_value or "").strip()
+    if not text:
+        return 0
+    digits = re.sub(r"[^0-9]", "", text)
+    return int(digits) if digits else 0
+
+
+def _estimate_rpm_by_category(category_text: str) -> float:
+    category = str(category_text or "").strip().lower()
+    if not category or category == "not-given":
+        return 2.5
+    if any(token in category for token in ("business", "finance", "marketing", "invest", "real estate")):
+        return 7.5
+    if any(token in category for token in ("education", "science", "technology", "howto", "how-to", "tutorial")):
+        return 4.0
+    if any(token in category for token in ("news", "politic")):
+        return 3.5
+    if any(token in category for token in ("travel", "lifestyle", "people", "blog")):
+        return 2.8
+    if any(token in category for token in ("sports", "pet", "autos")):
+        return 2.2
+    if any(token in category for token in ("music", "gaming", "entertainment", "comedy")):
+        return 1.8
+    return 2.5
+
+
+def _format_total_earnings(value: float) -> str:
+    return f"${int(round(max(0.0, value))):,}"
+
+
+def _format_daily_earnings(value: float) -> str:
+    return f"${max(0.0, value):,.2f}"
+
+
+def _apply_estimated_earnings(row_data: Dict[str, str]) -> Dict[str, str]:
+    payload = dict(row_data or {})
+    view_count_num = _parse_int_value(payload.get("View Count", ""))
+    avg_views_per_day = _parse_int_value(payload.get("Avg. Views per Day", ""))
+    if view_count_num <= 0:
+        payload["Est. Video Earnings"] = "not-given"
+        payload["Est. Earnings Per Day"] = "not-given"
+        return payload
+
+    rpm = _estimate_rpm_by_category(payload.get("Category", ""))
+    total_earnings = (view_count_num / 1000.0) * rpm
+    daily_earnings = (avg_views_per_day / 1000.0) * rpm if avg_views_per_day > 0 else 0.0
+    payload["Est. Video Earnings"] = _format_total_earnings(total_earnings)
+    payload["Est. Earnings Per Day"] = _format_daily_earnings(daily_earnings)
+    return payload
 
 
 def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url: str = "") -> Dict[str, str]:
@@ -275,9 +330,12 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
             "Tags": tags_text,
         }
     )
+    details = _apply_estimated_earnings(details)
 
     if yt_dlp is not None and (
-        details.get("Comments", "not-given") == "not-given"
+        details.get("Likes", "not-given") == "not-given"
+        or details.get("Est. Video Earnings", "not-given") == "not-given"
+        or details.get("Comments", "not-given") == "not-given"
         or details.get("Subscribers", "not-given") == "not-given"
         or details.get("Published", "not-given") == "not-given"
     ):
@@ -309,6 +367,7 @@ def fetch_video_page_details(video_id: str = "", video_link: str = "", proxy_url
                     views_digits = re.sub(r"[^0-9]", "", str(details.get("View Count", "")))
                     view_count_num = int(views_digits) if views_digits else 0
                     details["Avg. Views per Day"] = f"{int(view_count_num / max(1, age_days)):,}" if age_days > 0 else "0"
+                details = _apply_estimated_earnings(details)
         except Exception:
             pass
         finally:
@@ -932,6 +991,7 @@ class VideoSearchWorker(QThread):
             payload["Subtitles"] = "YES" if self.require_subtitles else "not-given"
             payload["Channel"] = channel_name
             payload["Channel Link"] = channel_link
+            payload = _apply_estimated_earnings(payload)
             seen_ids.add(video_id)
             results.append(payload)
             if len(results) >= self.max_results:

@@ -30,11 +30,11 @@ Status: done
 
 ## RPM-05
 - Filter template box va UI template
-Status: pending
+Status: done
 
 ## RPM-06
 - Save/load filter templates
-Status: pending
+Status: done
 
 ## RPM-07
 - Sort and ranking controls

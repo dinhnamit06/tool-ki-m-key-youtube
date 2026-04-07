@@ -23,7 +23,11 @@ from PyQt6.QtWidgets import (
 
 from core.rpm_data import ChannelRecord, build_sample_channels
 from core.rpm_service import RPMFilterState, RPMFinderService, categories_from_channels
+from core.rpm_template_store import RPMTemplateStore
+from core.rpm_templates import RPMFilterTemplate, build_builtin_templates, clone_state, summarize_template
 from ui.channel_card import ChannelCard
+from ui.filter_template_dialog import FilterTemplateDialog
+from PyQt6.QtWidgets import QInputDialog, QMessageBox
 
 
 class ChannelsPage(QWidget):
@@ -33,6 +37,9 @@ class ChannelsPage(QWidget):
         self.service = RPMFinderService(self.channels)
         self.filter_state = RPMFilterState()
         self.current_search_mode = "Keyword"
+        self.template_store = RPMTemplateStore()
+        self.templates = [*build_builtin_templates(), *self.template_store.load_custom_templates()]
+        self.current_template_name = "Default"
 
         root = QHBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
@@ -42,6 +49,8 @@ class ChannelsPage(QWidget):
         root.addWidget(self._build_results_area(), 1)
 
         self._sync_controls_from_state()
+        self._reload_templates(select_name="Default")
+        self._update_template_summary(self.current_template_name)
         self._apply_filters()
 
     def _build_filter_sidebar(self):
@@ -70,16 +79,29 @@ class ChannelsPage(QWidget):
         template_layout.setContentsMargins(14, 14, 14, 14)
         template_layout.setSpacing(10)
         self.cmb_template = QComboBox()
-        self.cmb_template.addItems(["Default", "High RPM", "Evergreen", "Low Competition"])
+        self.cmb_template.addItems([template.name for template in self.templates])
+        self.cmb_template.currentTextChanged.connect(self._update_template_summary)
         template_layout.addWidget(self.cmb_template)
+        self.lbl_template_summary = QLabel("")
+        self.lbl_template_summary.setObjectName("muted_label")
+        self.lbl_template_summary.setWordWrap(True)
+        template_layout.addWidget(self.lbl_template_summary)
         template_actions = QHBoxLayout()
         self.btn_apply_template = QPushButton("Apply")
         self.btn_apply_template.setObjectName("accent_btn")
         self.btn_apply_template.clicked.connect(self._apply_template)
+        self.btn_template_browser = QPushButton("Templates")
+        self.btn_template_browser.setObjectName("ghost_btn")
+        self.btn_template_browser.clicked.connect(self._open_template_browser)
+        self.btn_save_current = QPushButton("Save Current")
+        self.btn_save_current.setObjectName("ghost_btn")
+        self.btn_save_current.clicked.connect(self._save_current_template)
         self.btn_reset_sidebar = QPushButton("Reset")
         self.btn_reset_sidebar.setObjectName("ghost_btn")
         self.btn_reset_sidebar.clicked.connect(self._reset_filters)
         template_actions.addWidget(self.btn_apply_template)
+        template_actions.addWidget(self.btn_template_browser)
+        template_actions.addWidget(self.btn_save_current)
         template_actions.addWidget(self.btn_reset_sidebar)
         template_layout.addLayout(template_actions)
         layout.addWidget(template_box)
@@ -281,24 +303,89 @@ class ChannelsPage(QWidget):
         return widget
 
     def _apply_template(self):
-        template = self.cmb_template.currentText()
-        state = RPMFilterState()
-        if template == "High RPM":
-            state.rpm_min = 4.0
-            state.revenue_per_month_min = 5_000
-            state.average_views_min = 100_000
-        elif template == "Evergreen":
-            state.category = "History"
-            state.last_upload_after = None
-            state.avg_video_length_min = 8.0
-            state.avg_video_length_max = 20.0
-        elif template == "Low Competition":
-            state.subscriber_max = 180_000
-            state.average_views_min = 70_000
-            state.uploads_max = 600
-        self.filter_state = state
+        template_name = self.cmb_template.currentText()
+        template = self._find_template(template_name)
+        if template is None:
+            return
+        self.current_template_name = template.name
+        self.filter_state = clone_state(template.state)
         self._sync_controls_from_state()
+        self._update_template_summary(template.name)
         self._apply_filters()
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(f"Applied template: {template.name}", 2500)
+
+    def _open_template_browser(self):
+        dialog = FilterTemplateDialog(self.templates, self.cmb_template.currentText(), self)
+        if dialog.exec():
+            self.cmb_template.setCurrentText(dialog.selected_template_name)
+            self._apply_template()
+
+    def _save_current_template(self):
+        name, ok = QInputDialog.getText(self, "Save Filter Template", "Template name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "Save Filter Template", "Template name cannot be empty.")
+            return
+        existing = self._find_template(name)
+        if existing is not None and existing.built_in:
+            QMessageBox.warning(self, "Save Filter Template", "Built-in templates cannot be overwritten.")
+            return
+        if existing is not None and not existing.built_in:
+            result = QMessageBox.question(
+                self,
+                "Overwrite Template",
+                f"A custom template named '{name}' already exists. Overwrite it?",
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                return
+        description, ok = QInputDialog.getText(self, "Save Filter Template", "Short description:")
+        if not ok:
+            return
+        description = description.strip() or "Custom saved filter template."
+        template = RPMFilterTemplate(
+            name=name,
+            description=description,
+            state=self._build_state_from_controls(),
+            built_in=False,
+        )
+        self.template_store.upsert_custom_template(template)
+        self._reload_templates(select_name=name)
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(f"Saved custom template: {name}", 2500)
+
+    def _update_template_summary(self, template_name: str):
+        template = self._find_template(template_name)
+        if template is None:
+            self.lbl_template_summary.setText("")
+            return
+        self.current_template_name = template.name
+        self.lbl_template_summary.setText(summarize_template(template))
+
+    def _find_template(self, name: str) -> RPMFilterTemplate | None:
+        for template in self.templates:
+            if template.name == name:
+                return template
+        return None
+
+    def _reload_templates(self, select_name: str | None = None):
+        current_name = select_name or self.current_template_name or "Default"
+        self.templates = [*build_builtin_templates(), *self.template_store.load_custom_templates()]
+        self.cmb_template.blockSignals(True)
+        self.cmb_template.clear()
+        self.cmb_template.addItems([template.name for template in self.templates])
+        if self.cmb_template.findText(current_name) >= 0:
+            self.cmb_template.setCurrentText(current_name)
+            self.current_template_name = current_name
+        else:
+            self.cmb_template.setCurrentText("Default")
+            self.current_template_name = "Default"
+        self.cmb_template.blockSignals(False)
+        self._update_template_summary(self.cmb_template.currentText())
 
     def _sync_controls_from_state(self):
         state = self.filter_state
@@ -384,9 +471,13 @@ class ChannelsPage(QWidget):
 
     def _reset_filters(self):
         self.filter_state = RPMFilterState()
+        self.current_template_name = "Default"
+        self._reload_templates(select_name="Default")
+        self.cmb_template.setCurrentText("Default")
         self.search_input.clear()
         self.cmb_search_mode.setCurrentText("Keyword")
         self._sync_controls_from_state()
+        self._update_template_summary("Default")
         self._apply_filters()
 
     def _apply_filters(self):

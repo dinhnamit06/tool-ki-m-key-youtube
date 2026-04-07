@@ -567,6 +567,30 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
   - `Send to Title` / `Send to Description` cap nhat row da chon trong table.
   - compile/import pass: `ui/videos_tab.py`, `ui/content_spinner_tool_dialog.py`.
 
+### SV-33 - Estimated earnings columns logic
+- UI:
+  - giu 3 cot moi trong `Videos` table:
+    - `Est. Video Earnings`
+    - `Est. Earnings Per Day`
+    - `Email`
+- Logic:
+  - them helper uoc tinh doanh thu trong `core/videos_fetcher.py`.
+  - doanh thu tong = `View Count / 1000 * RPM estimate`.
+  - doanh thu/ngay = `Avg. Views per Day / 1000 * RPM estimate`.
+  - RPM default = muc co ban, co dieu chinh nhe theo `Category` neu co du lieu.
+  - search result row co the hien estimate ngay tu luc append row.
+  - metadata enrich sau do tinh lai estimate khi co them category / publish data.
+  - `Email` tam thoi giu `not-given` trong step nay.
+- Test:
+  - compile/import pass: `core/videos_fetcher.py`, `ui/videos_tab.py`
+  - helper sample:
+    - `View Count = 100,000`
+    - `Avg. Views per Day = 2,500`
+    - `Category = Education`
+    - output:
+      - `Est. Video Earnings = $400`
+      - `Est. Earnings Per Day = $10.00`
+
 ## 7) Checklist test manual (dung lai moi lan)
 - [ ] Search phrase rong -> canh bao.
 - [ ] Search phrase hop le -> co data.
@@ -597,6 +621,7 @@ Muc tieu: code tung buoc nho, moi buoc co UI + logic + test + screenshot doi chi
 | Analyze titles | `11 tube-atlas-analyze-titles` | done/doing/todo | SV-28 | |
 | Video title generator | Tube Atlas videos tool menu + generator popup | done/doing/todo | SV-31 | |
 | Content spinner | Tube Atlas videos tool menu | done/doing/todo | SV-32 | |
+| Estimated earnings columns | Tube Atlas videos browse/import table | done/doing/todo | SV-33 | |
 
 ## 9) Quy dinh truoc khi sang step tiep
 - Neu step hien tai chua PASS UI + PASS logic + PASS test + co SCR -> khong qua step moi.

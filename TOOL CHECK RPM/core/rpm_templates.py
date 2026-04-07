@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from core.rpm_service import RPMFilterState
 
@@ -10,6 +10,7 @@ class RPMFilterTemplate:
     name: str
     description: str
     state: RPMFilterState
+    built_in: bool = True
 
 
 def build_builtin_templates() -> list[RPMFilterTemplate]:
@@ -87,4 +88,4 @@ def summarize_template(template: RPMFilterTemplate) -> str:
 
 
 def clone_state(state: RPMFilterState) -> RPMFilterState:
-    return RPMFilterState(**state.__dict__)
+    return RPMFilterState(**asdict(state))
