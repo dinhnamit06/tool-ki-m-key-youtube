@@ -1187,6 +1187,13 @@ Output rules:
                 if item:
                     candidates.append(item)
 
+        current_mode = self._normalize_prompt_mode(self._selected_prompt_mode())
+        if current_mode == "seed expansion only":
+            candidates = self._filter_seed_expansion_candidates(candidates)
+            candidates = self._prioritize_seed_aligned_candidates(candidates)
+        elif current_mode not in {"balanced v2", "sub niche", "micro niche"}:
+            candidates = self._prioritize_seed_aligned_candidates(candidates)
+
         cleaned = []
         seen = set()
         for item in candidates:
@@ -1201,6 +1208,68 @@ Output rules:
             if len(cleaned) >= int(target_count):
                 break
         return cleaned
+
+    def _prioritize_seed_aligned_candidates(self, candidates):
+        normalized_seed = " ".join(str(self.seed_input.text() if hasattr(self, "seed_input") else "").strip().lower().split())
+        if not normalized_seed:
+            return list(candidates or [])
+
+        seed_tokens = [token for token in normalized_seed.split() if token]
+        if not seed_tokens:
+            return list(candidates or [])
+
+        scored = []
+        for index, candidate in enumerate(candidates or []):
+            normalized_candidate = " ".join(str(candidate or "").strip().lower().split())
+            if not normalized_candidate:
+                continue
+
+            token_match_count = sum(1 for token in seed_tokens if token in normalized_candidate)
+            contains_full_seed = normalized_seed in normalized_candidate
+            exact_match = normalized_candidate == normalized_seed
+            extra_words = max(0, len(normalized_candidate.split()) - len(seed_tokens))
+
+            score = 0
+            if contains_full_seed:
+                score += 100
+            score += token_match_count * 12
+            score += min(extra_words, 4) * 3
+            if exact_match:
+                score -= 8
+
+            scored.append((score, -index, candidate))
+
+        scored.sort(reverse=True)
+        return [candidate for _, _, candidate in scored]
+
+    def _filter_seed_expansion_candidates(self, candidates):
+        normalized_seed = " ".join(str(self.seed_input.text() if hasattr(self, "seed_input") else "").strip().lower().split())
+        seed_tokens = [token for token in normalized_seed.split() if token]
+        if not normalized_seed or not seed_tokens:
+            return list(candidates or [])
+
+        strong_matches = []
+        soft_matches = []
+        fallback = []
+
+        for candidate in candidates or []:
+            normalized_candidate = " ".join(str(candidate or "").strip().lower().split())
+            if not normalized_candidate:
+                continue
+
+            contains_full_seed = normalized_seed in normalized_candidate
+            contains_all_tokens = all(token in normalized_candidate for token in seed_tokens)
+            has_extra_words = len(normalized_candidate.split()) > len(seed_tokens)
+
+            if contains_full_seed and has_extra_words:
+                strong_matches.append(candidate)
+            elif contains_all_tokens and has_extra_words:
+                soft_matches.append(candidate)
+            else:
+                fallback.append(candidate)
+
+        prioritized = strong_matches + soft_matches + fallback
+        return prioritized if prioritized else list(candidates or [])
 
     def _setup_gemini_model_choices(self):
         options = [
