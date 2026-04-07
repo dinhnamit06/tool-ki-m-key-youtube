@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QStackedWidget, QSizePolicy, QTextEdit
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QStackedWidget, QSizePolicy, QTextEdit, QComboBox
 )
 from PyQt6.QtCore import Qt
 
@@ -11,7 +11,9 @@ from ui.video_to_text_tab import VideoToTextTab
 from ui.text_to_video_tab import TextToVideoTab
 from ui.comments_tab import CommentsTab
 from utils.constants import MAIN_STYLE
+from utils.i18n import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, translate
 from utils.proxy_utils import normalize_proxy
+from utils.session_store import load_session_json, save_session_json
 
 
 class ToolInboxPage(QWidget):
@@ -53,6 +55,7 @@ class ToolInboxPage(QWidget):
 class TubeVibeApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.current_language = self._load_language_setting()
         self.proxy_settings = {
             "enabled": False,
             "proxies": [],
@@ -60,10 +63,26 @@ class TubeVibeApp(QMainWindow):
         self.proxy_runtime_settings = {
             "max_proxies_per_run": 30,
         }
-        self.setWindowTitle("TubeVibe - YouTube Research Pro")
+        self.setWindowTitle(self._t("main.window_title", "TubeVibe - YouTube Research Pro"))
         self.resize(1280, 800)
         self.setup_ui()
         self.setStyleSheet(MAIN_STYLE)
+        self.apply_language(self.current_language, persist=False)
+
+    def _t(self, key, default=None, **kwargs):
+        return translate(self.current_language, key, default=default, **kwargs)
+
+    def _load_language_setting(self):
+        settings = load_session_json("app_settings", default={}) or {}
+        language = str(settings.get("language", DEFAULT_LANGUAGE)).strip().lower() or DEFAULT_LANGUAGE
+        if language not in SUPPORTED_LANGUAGES:
+            return DEFAULT_LANGUAGE
+        return language
+
+    def _save_language_setting(self):
+        existing = load_session_json("app_settings", default={}) or {}
+        existing["language"] = self.current_language
+        save_session_json("app_settings", existing)
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -83,15 +102,38 @@ class TubeVibeApp(QMainWindow):
         n_layout = QHBoxLayout(navbar); n_layout.setContentsMargins(20, 0, 20, 0)
         
         self.nav_labels = []
-        tabs_names = ["Welcome", "Keywords", "Trends", "Videos", "Channels", "Video to Text", "Text to Video", "Comments"]
-        for i, name in enumerate(tabs_names):
-            lbl = QLabel(name)
+        self.nav_keys = [
+            ("main.nav.welcome", "Welcome"),
+            ("main.nav.keywords", "Keywords"),
+            ("main.nav.trends", "Trends"),
+            ("main.nav.videos", "Videos"),
+            ("main.nav.channels", "Channels"),
+            ("main.nav.video_to_text", "Video to Text"),
+            ("main.nav.text_to_video", "Text to Video"),
+            ("main.nav.comments", "Comments"),
+        ]
+        for i, (key, default_text) in enumerate(self.nav_keys):
+            lbl = QLabel(self._t(key, default_text))
             lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-            lbl.setObjectName("active_tab" if name == "Keywords" else "inactive_tab")
+            lbl.setObjectName("active_tab" if i == 1 else "inactive_tab")
             lbl.mousePressEvent = lambda e, idx=i: self.switch_tab(idx)
             self.nav_labels.append(lbl)
             n_layout.addWidget(lbl)
         n_layout.addStretch()
+
+        self.language_label = QLabel()
+        self.language_label.setStyleSheet("color: #bbbbbb; font-size: 13px;")
+        self.language_combo = QComboBox()
+        self.language_combo.setMinimumWidth(120)
+        self.language_combo.setFixedHeight(34)
+        for code, label in SUPPORTED_LANGUAGES.items():
+            self.language_combo.addItem(label, code)
+        current_index = self.language_combo.findData(self.current_language)
+        if current_index >= 0:
+            self.language_combo.setCurrentIndex(current_index)
+        self.language_combo.currentIndexChanged.connect(self._handle_language_changed)
+        n_layout.addWidget(self.language_label)
+        n_layout.addWidget(self.language_combo)
         
         self.main_stack = QStackedWidget()
         self.tab_welcome = QWidget()
@@ -120,6 +162,49 @@ class TubeVibeApp(QMainWindow):
         r_layout.addWidget(navbar)
         r_layout.addWidget(self.main_stack, stretch=1)
         main_layout.addWidget(right_area, stretch=1)
+
+    def _handle_language_changed(self):
+        language = str(self.language_combo.currentData() or DEFAULT_LANGUAGE).strip().lower() or DEFAULT_LANGUAGE
+        if language == self.current_language:
+            return
+        self.apply_language(language, persist=True)
+
+    def apply_language(self, language, persist=True):
+        normalized = str(language or DEFAULT_LANGUAGE).strip().lower() or DEFAULT_LANGUAGE
+        if normalized not in SUPPORTED_LANGUAGES:
+            normalized = DEFAULT_LANGUAGE
+        self.current_language = normalized
+
+        self.setWindowTitle(self._t("main.window_title", "TubeVibe - YouTube Research Pro"))
+        if hasattr(self, "language_label"):
+            self.language_label.setText(self._t("main.language_label", "Language:"))
+        if hasattr(self, "language_combo"):
+            self.language_combo.blockSignals(True)
+            self.language_combo.setToolTip(self._t("main.language_tooltip", "Change the app language."))
+            current_index = self.language_combo.findData(self.current_language)
+            if current_index >= 0:
+                self.language_combo.setCurrentIndex(current_index)
+            self.language_combo.blockSignals(False)
+
+        for label, (key, default_text) in zip(self.nav_labels, self.nav_keys):
+            label.setText(self._t(key, default_text))
+
+        for widget in (
+            getattr(self, "tab_keywords", None),
+            getattr(self, "tab_trends", None),
+            getattr(self, "tab_videos", None),
+            getattr(self, "tab_channels", None),
+            getattr(self, "tab_video_to_text", None),
+            getattr(self, "tab_text_to_video", None),
+            getattr(self, "tab_comments", None),
+        ):
+            apply_language = getattr(widget, "apply_language", None)
+            if callable(apply_language):
+                apply_language(self.current_language)
+
+        self.switch_tab(self.main_stack.currentIndex())
+        if persist:
+            self._save_language_setting()
 
     def switch_tab(self, index):
         self.main_stack.setCurrentIndex(index)

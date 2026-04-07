@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 
 from core.trends_fetcher import TrendsFetcherWorker
 from utils.constants import CAT_MAP, COUNTRY_LIST, GEO_MAP, TIME_MAP
+from utils.i18n import DEFAULT_LANGUAGE, translate
 from utils.proxy_utils import parse_proxy_lines, to_requests_proxies
 
 try:
@@ -136,17 +137,18 @@ def build_daily_series(raw_data):
 
 
 class TrendChartDialog(QDialog):
-    def __init__(self, keyword, raw_data, google_trends_url, dark_theme=True, parent=None):
+    def __init__(self, keyword, raw_data, google_trends_url, dark_theme=True, language=DEFAULT_LANGUAGE, parent=None):
         super().__init__(parent)
         self.keyword = keyword
         self.raw_data = raw_data or []
         self.google_trends_url = google_trends_url
         self.dark_theme = bool(dark_theme)
+        self.language = str(language or DEFAULT_LANGUAGE).strip().lower() or DEFAULT_LANGUAGE
         self.figure = None
         self.axis = None
         self.canvas = None
 
-        self.setWindowTitle(f"Searches Over Time - {self.keyword}")
+        self.setWindowTitle(self._t("trends.chart.window_title", "Searches Over Time - {keyword}", keyword=self.keyword))
         self.setModal(True)
         self.resize(920, 560)
         if self.dark_theme:
@@ -187,6 +189,9 @@ class TrendChartDialog(QDialog):
         self._build_ui()
         self._draw_chart()
 
+    def _t(self, key, default=None, **kwargs):
+        return translate(self.language, key, default=default, **kwargs)
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -198,8 +203,8 @@ class TrendChartDialog(QDialog):
         except ImportError:
             QMessageBox.warning(
                 self,
-                "Chart Error",
-                "matplotlib is missing. Install it with: pip install matplotlib",
+                self._t("trends.chart.error_title", "Chart Error"),
+                self._t("trends.chart.missing_matplotlib", "matplotlib is missing. Install it with: pip install matplotlib"),
             )
             self.close()
             return
@@ -211,17 +216,17 @@ class TrendChartDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
 
-        self.btn_view_google = QPushButton("View on Google Trends")
+        self.btn_view_google = QPushButton(self._t("trends.chart.view_google", "View on Google Trends"))
         self.btn_view_google.setEnabled(bool(self.google_trends_url))
         self.btn_view_google.clicked.connect(self._open_google_trends)
 
-        self.chk_bar_chart = QCheckBox("Bar Chart")
+        self.chk_bar_chart = QCheckBox(self._t("trends.chart.bar_chart", "Bar Chart"))
         self.chk_bar_chart.stateChanged.connect(self._draw_chart)
 
-        self.btn_save = QPushButton("Save")
+        self.btn_save = QPushButton(self._t("common.save", "Save"))
         self.btn_save.clicked.connect(self._save_chart)
 
-        self.btn_close = QPushButton("Close")
+        self.btn_close = QPushButton(self._t("common.close", "Close"))
         self.btn_close.clicked.connect(self.accept)
 
         button_layout.addWidget(self.btn_view_google)
@@ -306,7 +311,7 @@ class TrendChartDialog(QDialog):
             self.axis.text(
                 0.5,
                 0.5,
-                "No trend data available.",
+                self._t("trends.chart.no_data", "No trend data available."),
                 transform=self.axis.transAxes,
                 ha="center",
                 va="center",
@@ -314,13 +319,13 @@ class TrendChartDialog(QDialog):
             )
 
         self.axis.set_title(
-            f"Worldwide Search Trends Over Time for {self.keyword}",
+            self._t("trends.chart.title", "Worldwide Search Trends Over Time for {keyword}", keyword=self.keyword),
             color=title_color,
             pad=10,
             fontsize=11,
             fontweight="semibold",
         )
-        self.axis.set_xlabel("Date", color=x_label_color, labelpad=10)
+        self.axis.set_xlabel(self._t("trends.chart.date", "Date"), color=x_label_color, labelpad=10)
         self.axis.set_ylabel("")
         self.axis.set_ylim(0, 100)
         self.axis.grid(False)
@@ -371,7 +376,7 @@ class TrendChartDialog(QDialog):
         default_name = f"{self.keyword.strip().replace(' ', '_') or 'trend_chart'}.png"
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Chart",
+            self._t("trends.chart.save_title", "Save Chart"),
             default_name,
             "PNG Files (*.png)",
         )
@@ -381,13 +386,18 @@ class TrendChartDialog(QDialog):
         try:
             self.figure.savefig(path, dpi=160, facecolor=self.figure.get_facecolor(), bbox_inches="tight")
         except Exception as exc:
-            QMessageBox.warning(self, "Save Error", f"Failed to save chart: {exc}")
+            QMessageBox.warning(
+                self,
+                self._t("trends.chart.save_error_title", "Save Error"),
+                self._t("trends.chart.save_error_message", "Failed to save chart: {error}", error=exc),
+            )
 
 
 class TrendsSettingsDialog(QDialog):
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, language=DEFAULT_LANGUAGE, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Trends Tool Settings")
+        self.language = str(language or DEFAULT_LANGUAGE).strip().lower() or DEFAULT_LANGUAGE
+        self.setWindowTitle(self._t("trends.settings.window_title", "Trends Tool Settings"))
         self.setModal(True)
         self.resize(620, 360)
         self.setStyleSheet(
@@ -421,6 +431,9 @@ class TrendsSettingsDialog(QDialog):
         self._settings = dict(settings)
         self._build_ui()
 
+    def _t(self, key, default=None, **kwargs):
+        return translate(self.language, key, default=default, **kwargs)
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 14)
@@ -430,22 +443,22 @@ class TrendsSettingsDialog(QDialog):
         self.chk_pause_after_connections = QCheckBox("")
         self.chk_pause_after_connections.setChecked(bool(self._settings.get("enable_pause_after_connections", True)))
         row1.addWidget(self.chk_pause_after_connections)
-        row1.addWidget(QLabel("After"))
+        row1.addWidget(QLabel(self._t("trends.settings.after", "After")))
         self.spin_pause_after = QSpinBox()
         self.spin_pause_after.setRange(1, 10000)
         self.spin_pause_after.setValue(int(self._settings.get("pause_after_connections", 20)))
         row1.addWidget(self.spin_pause_after)
-        row1.addWidget(QLabel("web connections, pause from"))
+        row1.addWidget(QLabel(self._t("trends.settings.web_connections_pause_from", "web connections, pause from")))
         self.spin_pause_min = QSpinBox()
         self.spin_pause_min.setRange(0, 3600)
         self.spin_pause_min.setValue(int(self._settings.get("pause_min_seconds", 10)))
         row1.addWidget(self.spin_pause_min)
-        row1.addWidget(QLabel("seconds to"))
+        row1.addWidget(QLabel(self._t("trends.settings.seconds_to", "seconds to")))
         self.spin_pause_max = QSpinBox()
         self.spin_pause_max.setRange(0, 3600)
         self.spin_pause_max.setValue(int(self._settings.get("pause_max_seconds", 60)))
         row1.addWidget(self.spin_pause_max)
-        row1.addWidget(QLabel("seconds"))
+        row1.addWidget(QLabel(self._t("trends.settings.seconds", "seconds")))
         row1.addStretch()
         root.addLayout(row1)
 
@@ -455,7 +468,7 @@ class TrendsSettingsDialog(QDialog):
             bool(self._settings.get("enable_max_consecutive_proxy_connections", True))
         )
         row2.addWidget(self.chk_max_consecutive_proxy)
-        row2.addWidget(QLabel("Max consecutive web connections per proxy:"))
+        row2.addWidget(QLabel(self._t("trends.settings.max_connections_per_proxy", "Max consecutive web connections per proxy:")))
         self.spin_consecutive_proxy = QSpinBox()
         self.spin_consecutive_proxy.setRange(1, 10000)
         self.spin_consecutive_proxy.setValue(
@@ -466,7 +479,7 @@ class TrendsSettingsDialog(QDialog):
         root.addLayout(row2)
 
         row3 = QHBoxLayout()
-        row3.addWidget(QLabel("Maximum concurrent workers"))
+        row3.addWidget(QLabel(self._t("trends.settings.max_workers", "Maximum concurrent workers")))
         self.spin_workers = QSpinBox()
         self.spin_workers.setRange(1, 2)
         self.spin_workers.setValue(min(2, int(self._settings.get("max_workers", 2))))
@@ -474,15 +487,15 @@ class TrendsSettingsDialog(QDialog):
         row3.addStretch()
         root.addLayout(row3)
 
-        self.chk_auto_sort = QCheckBox("Auto sort table by Total Average after finishing")
+        self.chk_auto_sort = QCheckBox(self._t("trends.settings.auto_sort", "Auto sort table by Total Average after finishing"))
         self.chk_auto_sort.setChecked(bool(self._settings.get("auto_sort_total_average", True)))
         root.addWidget(self.chk_auto_sort)
 
-        self.chk_browser_default = QCheckBox("Enable embedded browser panel by default")
+        self.chk_browser_default = QCheckBox(self._t("trends.settings.browser_default", "Enable embedded browser panel by default"))
         self.chk_browser_default.setChecked(bool(self._settings.get("enable_embedded_browser_default", False)))
         root.addWidget(self.chk_browser_default)
 
-        self.chk_dark_charts = QCheckBox("Dark theme for charts")
+        self.chk_dark_charts = QCheckBox(self._t("trends.settings.dark_charts", "Dark theme for charts"))
         self.chk_dark_charts.setChecked(bool(self._settings.get("dark_theme_charts", True)))
         root.addWidget(self.chk_dark_charts)
 
@@ -490,9 +503,9 @@ class TrendsSettingsDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        btn_ok = QPushButton("OK")
+        btn_ok = QPushButton(self._t("common.ok", "OK"))
         btn_ok.setObjectName("ok_btn")
-        btn_cancel = QPushButton("Cancel")
+        btn_cancel = QPushButton(self._t("common.cancel", "Cancel"))
         btn_ok.clicked.connect(self.accept)
         btn_cancel.clicked.connect(self.reject)
         btn_row.addWidget(btn_ok)
@@ -623,6 +636,7 @@ class TrendsTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self.current_language = getattr(main_window, "current_language", DEFAULT_LANGUAGE)
         self._sparkline_cache = {}
         self._worker_status_text = ""
         self.trends_settings = {
@@ -686,15 +700,18 @@ class TrendsTab(QWidget):
         self._browser_wait_timer.timeout.connect(self._load_next_browser_keyword)
         self.setup_ui()
 
+    def _t(self, key, default=None, **kwargs):
+        return translate(self.current_language, key, default=default, **kwargs)
+
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(35, 30, 35, 30)
         layout.setSpacing(20)
 
-        header_label = QLabel("Trends Tool")
-        header_label.setObjectName("header_label")
-        header_label.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        layout.addWidget(header_label)
+        self.header_label = QLabel("Trends Tool")
+        self.header_label.setObjectName("header_label")
+        self.header_label.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        layout.addWidget(self.header_label)
 
         top_bar = QFrame()
         top_bar.setStyleSheet("background-color: transparent;")
@@ -766,36 +783,36 @@ class TrendsTab(QWidget):
         self.t_combo_country.addItems(COUNTRY_LIST)
         self.t_combo_country.setMaxVisibleItems(18)
         self.t_combo_country.setStyleSheet(combo_style)
-        lbl_country = QLabel("Country:")
-        lbl_country.setStyleSheet(label_style)
-        form_layout.addRow(lbl_country, self.t_combo_country)
+        self.lbl_country = QLabel("Country:")
+        self.lbl_country.setStyleSheet(label_style)
+        form_layout.addRow(self.lbl_country, self.t_combo_country)
 
         self.t_combo_period = QComboBox()
         self.t_combo_period.addItems(["Past 30 days", "Past 7 days", "Past 12 months", "2004 - present"])
         self.t_combo_period.setStyleSheet(combo_style)
-        lbl_period = QLabel("Time Period:")
-        lbl_period.setStyleSheet(label_style)
-        form_layout.addRow(lbl_period, self.t_combo_period)
+        self.lbl_period = QLabel("Time Period:")
+        self.lbl_period.setStyleSheet(label_style)
+        form_layout.addRow(self.lbl_period, self.t_combo_period)
 
         self.t_combo_cat = QComboBox()
         self.t_combo_cat.addItems(["All Categories", "Arts & Entertainment", "Autos & Vehicles", "Beauty & Fitness", "Games"])
         self.t_combo_cat.setStyleSheet(combo_style)
-        lbl_cat = QLabel("Category:")
-        lbl_cat.setStyleSheet(label_style)
-        form_layout.addRow(lbl_cat, self.t_combo_cat)
+        self.lbl_cat = QLabel("Category:")
+        self.lbl_cat.setStyleSheet(label_style)
+        form_layout.addRow(self.lbl_cat, self.t_combo_cat)
 
         self.t_combo_prop = QComboBox()
         self.t_combo_prop.addItems(["Youtube Search", "Web Search", "Image Search", "News Search", "Google Shopping"])
         self.t_combo_prop.setStyleSheet(combo_style)
-        lbl_prop = QLabel("Property:")
-        lbl_prop.setStyleSheet(label_style)
-        form_layout.addRow(lbl_prop, self.t_combo_prop)
+        self.lbl_prop = QLabel("Property:")
+        self.lbl_prop.setStyleSheet(label_style)
+        form_layout.addRow(self.lbl_prop, self.t_combo_prop)
 
         left_layout.addLayout(form_layout)
 
-        kw_label = QLabel("Enter one keyword per line:")
-        kw_label.setStyleSheet("color: #bbbbbb; font-size: 12px; margin-top: 10px;")
-        left_layout.addWidget(kw_label)
+        self.kw_label = QLabel("Enter one keyword per line:")
+        self.kw_label.setStyleSheet("color: #bbbbbb; font-size: 12px; margin-top: 10px;")
+        left_layout.addWidget(self.kw_label)
 
         self.trends_input = QTextEdit()
         self.trends_input.setStyleSheet("background-color: #ffffff; color: #000000; border: 1px solid #aaa; border-radius: 2px;")
@@ -804,20 +821,7 @@ class TrendsTab(QWidget):
 
         self.trends_table = QTableWidget()
         self.trends_table.setColumnCount(11)
-        headers = [
-            "Chart",
-            "Keyword",
-            "Country",
-            "Time Period",
-            "Category",
-            "Property",
-            "Word Count",
-            "Character Count",
-            "Total Average",
-            "Trend Slope",
-            "Trending Spike",
-        ]
-        self.trends_table.setHorizontalHeaderLabels(headers)
+        self.trends_table.setHorizontalHeaderLabels(self._translated_trends_table_headers())
         self._update_chart_header_label()
         self._setup_trends_table_columns()
         self.trends_table.verticalHeader().setDefaultSectionSize(36)
@@ -860,9 +864,9 @@ class TrendsTab(QWidget):
         proxy_top.addWidget(self.btn_proxy_hide)
         self.browser_panel_layout.addLayout(proxy_top)
 
-        proxy_label = QLabel("Enter one proxy per line:")
-        proxy_label.setStyleSheet("color: #d4d8e2; font-size: 11px;")
-        self.browser_panel_layout.addWidget(proxy_label)
+        self.proxy_label = QLabel("Enter one proxy per line:")
+        self.proxy_label.setStyleSheet("color: #d4d8e2; font-size: 11px;")
+        self.browser_panel_layout.addWidget(self.proxy_label)
 
         self.proxy_input = QTextEdit()
         self.proxy_input.setPlaceholderText(
@@ -891,7 +895,8 @@ class TrendsTab(QWidget):
         )
         proxy_health_row.addWidget(self.chk_proxy_health_before_go)
         proxy_health_row.addStretch()
-        proxy_health_row.addWidget(QLabel("Timeout"))
+        self.lbl_proxy_timeout = QLabel("Timeout")
+        proxy_health_row.addWidget(self.lbl_proxy_timeout)
         self.spin_proxy_health_timeout = QSpinBox()
         self.spin_proxy_health_timeout.setRange(1, 15)
         self.spin_proxy_health_timeout.setValue(4)
@@ -902,16 +907,17 @@ class TrendsTab(QWidget):
             lambda value: setattr(self, "_proxy_health_timeout_seconds", float(value))
         )
         proxy_health_row.addWidget(self.spin_proxy_health_timeout)
-        proxy_health_row.addWidget(QLabel("s"))
+        self.lbl_proxy_timeout_unit = QLabel("s")
+        proxy_health_row.addWidget(self.lbl_proxy_timeout_unit)
         self.browser_panel_layout.addLayout(proxy_health_row)
 
         proxy_btn_row = QHBoxLayout()
         proxy_btn_row.setContentsMargins(0, 0, 0, 0)
         proxy_btn_row.setSpacing(6)
 
-        source_label = QLabel("Source:")
-        source_label.setStyleSheet("color: #cfd4df; font-size: 11px;")
-        proxy_btn_row.addWidget(source_label)
+        self.source_label = QLabel("Source:")
+        self.source_label.setStyleSheet("color: #cfd4df; font-size: 11px;")
+        proxy_btn_row.addWidget(self.source_label)
 
         self.combo_proxy_source = QComboBox()
         self.combo_proxy_source.addItems([
@@ -997,6 +1003,7 @@ class TrendsTab(QWidget):
         b_layout.addWidget(self.t_btn_clear)
         layout.addWidget(bottom_toolbar)
         self._set_fetch_buttons_running(False)
+        self.apply_language(self.current_language)
         self._refresh_status_label()
 
     def clear_trends_table(self):
@@ -1008,6 +1015,60 @@ class TrendsTab(QWidget):
         self._apply_trends_table_column_widths()
         self._worker_status_text = ""
         self._pending_input_keywords = []
+        self._refresh_status_label()
+
+    def _translated_trends_table_headers(self):
+        return [
+            self._t("trends.table.chart", "Chart"),
+            self._t("trends.table.keyword", "Keyword"),
+            self._t("trends.table.country", "Country"),
+            self._t("trends.table.time_period", "Time Period"),
+            self._t("trends.table.category", "Category"),
+            self._t("trends.table.property", "Property"),
+            self._t("trends.table.word_count", "Word Count"),
+            self._t("trends.table.character_count", "Character Count"),
+            self._t("trends.table.total_average", "Total Average"),
+            self._t("trends.table.trend_slope", "Trend Slope"),
+            self._t("trends.table.trending_spike", "Trending Spike"),
+        ]
+
+    def apply_language(self, language):
+        self.current_language = str(language or DEFAULT_LANGUAGE).strip().lower() or DEFAULT_LANGUAGE
+        self.header_label.setText(self._t("trends.title", "Trends Tool"))
+        self.btn_trends_go.setText(self._t("common.go", "Go"))
+        self.btn_trends_stop.setText(self._t("common.stop", "Stop"))
+        self.btn_trends_settings.setText(self._t("common.settings", "Settings"))
+        self.btn_trends_browser.setText(self._t("common.browser", "Browser"))
+        self.btn_use_proxies.setText(self._t("trends.use_proxies", "Use Proxies"))
+
+        self.lbl_country.setText(self._t("trends.country", "Country:"))
+        self.lbl_period.setText(self._t("trends.time_period", "Time Period:"))
+        self.lbl_cat.setText(self._t("trends.category", "Category:"))
+        self.lbl_prop.setText(self._t("trends.property", "Property:"))
+        self.kw_label.setText(self._t("trends.enter_keywords", "Enter one keyword per line:"))
+
+        self.trends_table.setHorizontalHeaderLabels(self._translated_trends_table_headers())
+        self._update_chart_header_label()
+
+        self.lbl_proxy_title.setText(self._t("trends.use_proxies", "Use Proxies"))
+        self.btn_proxy_hide.setText(
+            self._t("common.show", "Show") if self._proxy_panel_hidden else self._t("common.hide", "Hide")
+        )
+        self.proxy_label.setText(self._t("trends.enter_proxies", "Enter one proxy per line:"))
+        self.chk_proxy_health_before_go.setText(self._t("trends.proxy_health_before_go", "Health check before Go"))
+        self.lbl_proxy_timeout.setText(self._t("trends.proxy_timeout", "Timeout"))
+        self.lbl_proxy_timeout_unit.setText(self._t("trends.proxy_timeout_unit", "s"))
+        self.source_label.setText(self._t("trends.proxy_source", "Source:"))
+        self.btn_load_free_proxies.setText(self._t("trends.load_free_proxies", "Load Free Proxies"))
+        self.btn_load_proxy_txt.setText(self._t("trends.load_txt", "Load TXT"))
+        self.btn_check_proxy_health.setText(self._t("trends.check_proxies", "Check Proxies"))
+        self.btn_proxy_settings.setText(self._t("common.settings", "Settings"))
+        self._refresh_proxy_summary()
+
+        self.t_btn_vol.setText(self._t("common.volume_data", "Volume Data"))
+        self.t_btn_hash.setText(self._t("common.hashtags", "Hashtags"))
+        self.t_btn_file.setText(self._t("common.file", "File"))
+        self.t_btn_clear.setText(self._t("common.clear", "Clear"))
         self._refresh_status_label()
 
     def _collect_proxy_list_from_ui(self):
@@ -1026,7 +1087,7 @@ class TrendsTab(QWidget):
         if not hasattr(self, "lbl_proxy_total"):
             return
         count = len(self._collect_proxy_list_from_ui())
-        self.lbl_proxy_total.setText(f"Total: {count}")
+        self.lbl_proxy_total.setText(self._t("common.total_count", "Total: {count}", count=count))
 
     def _on_proxy_text_changed(self):
         self._refresh_proxy_summary()
@@ -1037,11 +1098,17 @@ class TrendsTab(QWidget):
         self._set_proxy_panel_visible(bool(checked))
         self._sync_proxy_settings_to_main_window()
         if checked and not self._collect_proxy_list_from_ui():
-            self._show_status_message("Proxy is ON but proxy list is empty.")
+            self._show_status_message(self._t("trends.proxy_on_empty", "Proxy is ON but proxy list is empty."))
         elif checked:
-            self._show_status_message(f"Proxy enabled ({len(self._collect_proxy_list_from_ui())} entries).")
+            self._show_status_message(
+                self._t(
+                    "trends.proxy_enabled",
+                    "Proxy enabled ({count} entries).",
+                    count=len(self._collect_proxy_list_from_ui()),
+                )
+            )
         else:
-            self._show_status_message("Proxy disabled.")
+            self._show_status_message(self._t("trends.proxy_disabled", "Proxy disabled."))
 
     def _set_proxy_panel_visible(self, visible):
         if visible:
@@ -1051,13 +1118,13 @@ class TrendsTab(QWidget):
             table_width = max(420, total_width - 260 - right_width)
             self.trends_splitter.setSizes([260, table_width, right_width])
             self._proxy_panel_hidden = False
-            self.btn_proxy_hide.setText("Hide")
+            self.btn_proxy_hide.setText(self._t("common.hide", "Hide"))
         else:
             self.browser_panel.hide()
             total_width = max(900, self.trends_splitter.width())
             self.trends_splitter.setSizes([260, max(420, total_width - 260), 0])
             self._proxy_panel_hidden = True
-            self.btn_proxy_hide.setText("Show")
+            self.btn_proxy_hide.setText(self._t("common.show", "Show"))
 
     def _toggle_proxy_panel_visibility(self):
         if self._proxy_panel_hidden:
@@ -1072,25 +1139,28 @@ class TrendsTab(QWidget):
     def _open_proxy_help_dialog(self):
         QMessageBox.information(
             self,
-            "Proxy Format Help",
-            "Supported formats:\n"
-            "- ip:port\n"
-            "- http://ip:port\n"
-            "- user:pass@ip:port\n"
-            "- http://user:pass@ip:port\n"
-            "- ip:port:user:pass\n"
-            "- user:pass:ip:port\n\n"
-            "Free source UI options:\n"
-            "- Webshare.io\n"
-            "- ProxyScrape\n"
-            "- GeoNode\n"
-            "- Free Proxy List",
+            self._t("trends.proxy_help.title", "Proxy Format Help"),
+            self._t(
+                "trends.proxy_help.body",
+                "Supported formats:\n"
+                "- ip:port\n"
+                "- http://ip:port\n"
+                "- user:pass@ip:port\n"
+                "- http://user:pass@ip:port\n"
+                "- ip:port:user:pass\n"
+                "- user:pass:ip:port\n\n"
+                "Free source UI options:\n"
+                "- Webshare.io\n"
+                "- ProxyScrape\n"
+                "- GeoNode\n"
+                "- Free Proxy List",
+            ),
         )
 
     def _load_proxies_from_txt(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Proxy TXT",
+            self._t("trends.proxy_txt.load_title", "Load Proxy TXT"),
             "",
             "Text Files (*.txt);;All Files (*.*)",
         )
@@ -1109,24 +1179,33 @@ class TrendsTab(QWidget):
                 continue
 
         if not text_data.strip():
-            QMessageBox.warning(self, "Proxy TXT", "File is empty or cannot be read.")
+            QMessageBox.warning(
+                self,
+                self._t("trends.proxy_txt.title", "Proxy TXT"),
+                self._t("trends.proxy_txt.empty_file", "File is empty or cannot be read."),
+            )
             return
 
         loaded = parse_proxy_lines(text_data)
         if not loaded:
             QMessageBox.warning(
                 self,
-                "Proxy TXT",
-                "No valid proxies found.\nSupported formats:\n"
-                "- ip:port\n"
-                "- user:pass@ip:port\n"
-                "- ip:port:user:pass\n"
-                "- user:pass:ip:port",
+                self._t("trends.proxy_txt.title", "Proxy TXT"),
+                self._t(
+                    "trends.proxy_txt.no_valid_proxies",
+                    "No valid proxies found.\nSupported formats:\n"
+                    "- ip:port\n"
+                    "- user:pass@ip:port\n"
+                    "- ip:port:user:pass\n"
+                    "- user:pass:ip:port",
+                ),
             )
             return
 
         added, total = self._merge_proxy_list_into_ui(loaded)
-        self._show_status_message(f"Loaded {added} proxies from TXT. Total: {total}")
+        self._show_status_message(
+            self._t("trends.status.loaded_proxies_from_txt", "Loaded {added} proxies from TXT. Total: {total}", added=added, total=total)
+        )
 
     @staticmethod
     def _dedupe_proxies(proxies):
@@ -1197,18 +1276,30 @@ class TrendsTab(QWidget):
     def _run_proxy_health_check_only(self):
         proxies = self._collect_proxy_list_from_ui()
         if not proxies:
-            QMessageBox.warning(self, "Proxy Health", "Proxy list is empty.")
+            QMessageBox.warning(
+                self,
+                self._t("trends.proxy_health.title", "Proxy Health"),
+                self._t("trends.proxy_health.empty_list", "Proxy list is empty."),
+            )
             return
         self._start_proxy_health_check(proxies, auto_start_fetch=False)
 
     def _start_proxy_health_check(self, proxies, auto_start_fetch=False):
         if self._proxy_health_worker is not None and self._proxy_health_worker.isRunning():
-            QMessageBox.information(self, "Proxy Health", "Proxy health check is already running.")
+            QMessageBox.information(
+                self,
+                self._t("trends.proxy_health.title", "Proxy Health"),
+                self._t("trends.proxy_health.already_running", "Proxy health check is already running."),
+            )
             return False
 
         proxy_candidates = [str(p).strip() for p in (proxies or []) if str(p).strip()]
         if not proxy_candidates:
-            QMessageBox.warning(self, "Proxy Health", "No proxies to check.")
+            QMessageBox.warning(
+                self,
+                self._t("trends.proxy_health.title", "Proxy Health"),
+                self._t("trends.proxy_health.no_proxies", "No proxies to check."),
+            )
             return False
 
         self._set_proxy_ui_busy(True)
@@ -1245,7 +1336,7 @@ class TrendsTab(QWidget):
 
         if not run_fetch:
             self._set_fetch_buttons_running(False)
-            QMessageBox.information(self, "Proxy Health", base_msg)
+            QMessageBox.information(self, self._t("trends.proxy_health.title", "Proxy Health"), base_msg)
             return
 
         pending_keywords = list(self._pending_keywords_after_proxy_check)
@@ -1258,8 +1349,8 @@ class TrendsTab(QWidget):
             self._set_fetch_buttons_running(False)
             QMessageBox.warning(
                 self,
-                "Proxy Health",
-                "No live proxies found. Please load another list or disable proxy.",
+                self._t("trends.proxy_health.title", "Proxy Health"),
+                self._t("trends.proxy_health.no_live_proxies", "No live proxies found. Please load another list or disable proxy."),
             )
             return
 
@@ -1325,8 +1416,8 @@ class TrendsTab(QWidget):
     def _load_from_webshare(self):
         token, ok = QInputDialog.getText(
             self,
-            "Webshare Token",
-            "Enter your Webshare download token:",
+            self._t("trends.webshare.title", "Webshare Token"),
+            self._t("trends.webshare.prompt", "Enter your Webshare download token:"),
         )
         if not ok or not str(token).strip():
             return []
@@ -1337,11 +1428,11 @@ class TrendsTab(QWidget):
 
     def _load_free_proxies(self):
         if requests is None:
-            QMessageBox.warning(self, "Proxy", "requests is required. Run: pip install requests")
+            QMessageBox.warning(self, self._t("trends.proxy.title", "Proxy"), self._t("trends.proxy.requests_required", "requests is required. Run: pip install requests"))
             return
 
         source = self.combo_proxy_source.currentText() if hasattr(self, "combo_proxy_source") else "ProxyScrape"
-        self._show_status_message(f"Loading free proxies from {source}...")
+        self._show_status_message(self._t("trends.status.loading_free_proxies", "Loading free proxies from {source}...", source=source))
         QApplication.processEvents()
 
         try:
@@ -1354,20 +1445,30 @@ class TrendsTab(QWidget):
             else:
                 loaded = self._load_from_free_proxy_list()
         except Exception as exc:
-            QMessageBox.warning(self, "Proxy", f"Failed to load proxies from {source}:\n{exc}")
-            self._show_status_message(f"Proxy load failed from {source}.")
+            QMessageBox.warning(
+                self,
+                self._t("trends.proxy.title", "Proxy"),
+                self._t("trends.proxy.load_failed", "Failed to load proxies from {source}:\n{error}", source=source, error=exc),
+            )
+            self._show_status_message(self._t("trends.status.proxy_load_failed", "Proxy load failed from {source}.", source=source))
             return
 
         if not loaded:
-            QMessageBox.information(self, "Proxy", f"No proxies returned from {source}.")
-            self._show_status_message(f"No proxies returned from {source}.")
+            QMessageBox.information(
+                self,
+                self._t("trends.proxy.title", "Proxy"),
+                self._t("trends.proxy.none_returned", "No proxies returned from {source}.", source=source),
+            )
+            self._show_status_message(self._t("trends.proxy.none_returned", "No proxies returned from {source}.", source=source))
             return
 
         added, total = self._merge_proxy_list_into_ui(loaded)
-        self._show_status_message(f"Loaded {added} new proxies from {source}. Total: {total}")
+        self._show_status_message(
+            self._t("trends.status.loaded_new_proxies", "Loaded {added} new proxies from {source}. Total: {total}", added=added, source=source, total=total)
+        )
 
     def _refresh_status_label(self):
-        total_text = f"Total Items: {self.trends_table.rowCount()}"
+        total_text = self._t("trends.total_items", "Total Items: {count}", count=self.trends_table.rowCount())
         if self._worker_status_text:
             self.t_status.setText(f"{self._worker_status_text} | {total_text}")
         else:
@@ -1416,7 +1517,8 @@ class TrendsTab(QWidget):
         if header_item is None:
             header_item = QTableWidgetItem()
             self.trends_table.setHorizontalHeaderItem(0, header_item)
-        header_item.setText("[x] Chart" if self._chart_header_checked else "[ ] Chart")
+        chart_text = self._t("trends.table.chart", "Chart")
+        header_item.setText(f"[x] {chart_text}" if self._chart_header_checked else f"[ ] {chart_text}")
 
     def _set_all_chart_checkboxes(self, checked):
         self._chart_check_syncing = True
@@ -1522,7 +1624,7 @@ class TrendsTab(QWidget):
 
         if self.trends_table.columnWidth(0) != old_chart_width:
             self._refresh_sparklines()
-        self._show_status_message("Auto-fit column widths applied.")
+        self._show_status_message(self._t("trends.status.auto_fit_applied", "Auto-fit column widths applied."))
 
     def _reset_trends_column_widths(self):
         header = self.trends_table.horizontalHeader()
@@ -1541,7 +1643,7 @@ class TrendsTab(QWidget):
 
         if self.trends_table.columnWidth(0) != old_chart_width:
             self._refresh_sparklines()
-        self._show_status_message("Column widths reset.")
+        self._show_status_message(self._t("trends.status.column_widths_reset", "Column widths reset."))
 
     @staticmethod
     def _extract_values(raw_data):
@@ -1714,29 +1816,29 @@ class TrendsTab(QWidget):
     def toggle_browser_panel(self):
         self._open_external_browser_sequence = not self._open_external_browser_sequence
         if self._open_external_browser_sequence:
-            self.btn_trends_browser.setText("Browser On")
+            self.btn_trends_browser.setText(self._t("trends.browser.on", "Browser On"))
             self.btn_trends_browser.setStyleSheet(
                 "background-color: #ff2b2b; color: white; border: none; font-weight: bold; border-radius: 4px;"
             )
             QMessageBox.information(
                 self,
-                "Browser Mode",
-                "External browser auto-open is ON.\nTabs will be opened in background mode when possible.",
+                self._t("trends.browser.mode_title", "Browser Mode"),
+                self._t("trends.browser.on_message", "External browser auto-open is ON.\nTabs will be opened in background mode when possible."),
             )
         else:
-            self.btn_trends_browser.setText("Browser")
+            self.btn_trends_browser.setText(self._t("common.browser", "Browser"))
             self.btn_trends_browser.setStyleSheet(
                 "background-color: #e50914; color: white; border: none; font-weight: bold; border-radius: 4px;"
             )
             QMessageBox.information(
                 self,
-                "Browser Mode",
-                "External browser auto-open is OFF.\nGo will fetch data in app without popping browser tabs.",
+                self._t("trends.browser.mode_title", "Browser Mode"),
+                self._t("trends.browser.off_message", "External browser auto-open is OFF.\nGo will fetch data in app without popping browser tabs."),
             )
 
     def _show_browser_panel_for_sequence(self):
         self.browser_panel.hide()
-        self.btn_trends_browser.setText("Browser")
+        self.btn_trends_browser.setText(self._t("common.browser", "Browser"))
         total_width = max(900, self.trends_splitter.width())
         self.trends_splitter.setSizes([260, max(400, total_width - 260), 0])
         return True
@@ -1745,7 +1847,7 @@ class TrendsTab(QWidget):
         self.btn_trends_go.setVisible(not running)
         self.btn_trends_stop.setVisible(running)
         if not running:
-            self.btn_trends_stop.setText("Stop")
+            self.btn_trends_stop.setText(self._t("common.stop", "Stop"))
 
     def _is_pytrends_running(self):
         return hasattr(self, "trends_worker") and self.trends_worker.isRunning()
@@ -1770,9 +1872,9 @@ class TrendsTab(QWidget):
         self._browser_keywords_queue = []
         self._browser_keyword_index = 0
         if stopped:
-            self._set_worker_status("Opening in browser stopped.")
+            self._set_worker_status(self._t("trends.browser.stopped", "Opening in browser stopped."))
         else:
-            self._set_worker_status("Opening in browser complete.")
+            self._set_worker_status(self._t("trends.browser.complete", "Opening in browser complete."))
         if not self._is_pytrends_running():
             self._set_fetch_buttons_running(False)
 
@@ -1787,13 +1889,17 @@ class TrendsTab(QWidget):
         keyword = self._browser_keywords_queue[self._browser_keyword_index]
         idx = self._browser_keyword_index + 1
         geo_code = GEO_MAP.get(self.t_combo_country.currentText(), "")
-        self._set_worker_status(f"Opening '{keyword}' in browser ({idx}/{total}) with geo={geo_code}...")
+        self._set_worker_status(
+            self._t("trends.browser.opening", "Opening '{keyword}' in browser ({index}/{total}) with geo={geo}...", keyword=keyword, index=idx, total=total, geo=geo_code)
+        )
         url = self._build_browser_sequence_url(keyword)
         try:
             # Background-friendly open: same browser window, avoid stealing focus when possible.
             webbrowser.open(url, new=0, autoraise=False)
         except Exception as exc:
-            self._set_worker_status(f"Failed to open '{keyword}' in browser: {exc}")
+            self._set_worker_status(
+                self._t("trends.browser.open_failed", "Failed to open '{keyword}' in browser: {error}", keyword=keyword, error=exc)
+            )
             self._finish_browser_sequence(stopped=True)
             return
 
@@ -1834,10 +1940,10 @@ class TrendsTab(QWidget):
         if proxy_list and proxy_override is None:
             proxy_list = proxy_list[:max_proxies_per_run]
         if use_proxies and not proxy_list:
-            QMessageBox.warning(self, "Proxy", "Proxy is enabled but the list is empty.")
+            QMessageBox.warning(self, self._t("trends.proxy.title", "Proxy"), self._t("trends.proxy.enabled_but_empty", "Proxy is enabled but the list is empty."))
             return False
 
-        self._set_worker_status("Starting trends fetch...")
+        self._set_worker_status(self._t("trends.status.starting_fetch", "Starting trends fetch..."))
         self.trends_table.setSortingEnabled(False)
         self._set_fetch_buttons_running(True)
         self.trends_worker = TrendsFetcherWorker(
@@ -1897,7 +2003,11 @@ class TrendsTab(QWidget):
         text = self.trends_input.toPlainText()
         keywords = [line.strip() for line in text.split("\n") if line.strip()]
         if not keywords:
-            QMessageBox.warning(self, "No Keywords", "Please enter keywords.")
+            QMessageBox.warning(
+                self,
+                self._t("trends.no_keywords_title", "No Keywords"),
+                self._t("trends.no_keywords_message", "Please enter keywords."),
+            )
             return
 
         self._pending_input_keywords = list(keywords)
@@ -1920,7 +2030,7 @@ class TrendsTab(QWidget):
                 max_proxies_per_run = max(1, int(self.trends_settings.get("max_proxies_per_run", 30)))
                 proxy_list = proxy_list[:max_proxies_per_run]
                 if not proxy_list:
-                    QMessageBox.warning(self, "Proxy", "Proxy is enabled but the list is empty.")
+                    QMessageBox.warning(self, self._t("trends.proxy.title", "Proxy"), self._t("trends.proxy.enabled_but_empty", "Proxy is enabled but the list is empty."))
                     return
                 self._pending_keywords_after_proxy_check = list(keywords)
                 started = self._start_proxy_health_check(proxy_list, auto_start_fetch=True)
@@ -1942,13 +2052,13 @@ class TrendsTab(QWidget):
         if self._proxy_health_worker is not None and self._proxy_health_worker.isRunning():
             self._pending_keywords_after_proxy_check = []
             self._proxy_health_worker.stop()
-            self.btn_trends_stop.setText("Stopping...")
-            self._set_worker_status("Stopping proxy health check...")
+            self.btn_trends_stop.setText(self._t("trends.stopping", "Stopping..."))
+            self._set_worker_status(self._t("trends.status.stopping_proxy_health", "Stopping proxy health check..."))
             return
 
         if hasattr(self, "trends_worker") and self.trends_worker.isRunning():
             self.trends_worker.is_running = False
-            self.btn_trends_stop.setText("Stopping...")
+            self.btn_trends_stop.setText(self._t("trends.stopping", "Stopping..."))
             return
 
         if not self._browser_sequence_active:
@@ -2022,15 +2132,19 @@ class TrendsTab(QWidget):
         self.trends_table.setSortingEnabled(True)
         self.trends_table.sortItems(8, Qt.SortOrder.DescendingOrder)
         self._apply_trends_table_column_widths()
-        self._set_worker_status("Trends fetch completed.")
+        self._set_worker_status(self._t("trends.status.fetch_completed", "Trends fetch completed."))
 
-        QMessageBox.information(self, "Finished", "Trends data fetching complete!")
+        QMessageBox.information(
+            self,
+            self._t("common.finished", "Finished"),
+            self._t("trends.finished_message", "Trends data fetching complete!"),
+        )
 
     def on_trends_error(self, err):
         if not self._browser_sequence_active:
             self._set_fetch_buttons_running(False)
-        self._set_worker_status(f"Error: {err}")
-        QMessageBox.critical(self, "Error", err)
+        self._set_worker_status(f"{self._t('common.error', 'Error')}: {err}")
+        QMessageBox.critical(self, self._t("common.error", "Error"), err)
 
     def show_trend_chart(self, row, column):
         if column != 0:
@@ -2042,7 +2156,11 @@ class TrendsTab(QWidget):
 
         payload = chart_item.data(Qt.ItemDataRole.UserRole)
         if not payload:
-            QMessageBox.information(self, "No Data", "No trend data available for this keyword.")
+            QMessageBox.information(
+                self,
+                self._t("common.no_data", "No Data"),
+                self._t("trends.chart.no_data_for_keyword", "No trend data available for this keyword."),
+            )
             return
 
         dialog = TrendChartDialog(
@@ -2050,6 +2168,7 @@ class TrendsTab(QWidget):
             raw_data=payload.get("raw_data", []),
             google_trends_url=payload.get("google_trends_url", ""),
             dark_theme=self.trends_settings.get("dark_theme_charts", True),
+            language=self.current_language,
             parent=self,
         )
         dialog.exec()
@@ -2102,7 +2221,11 @@ class TrendsTab(QWidget):
         self.t_status.setText(message)
 
     def _show_next_steps_message(self):
-        QMessageBox.information(self, "Coming Soon", "This feature will be implemented in the next steps")
+        QMessageBox.information(
+            self,
+            self._t("common.coming_soon", "Coming Soon"),
+            self._t("common.next_steps_message", "This feature will be implemented in the next steps"),
+        )
 
     def _add_context_action(self, menu, text, callback, icon=None):
         action = menu.addAction(text)
@@ -2112,7 +2235,11 @@ class TrendsTab(QWidget):
         return action
 
     def _warn_select_rows(self):
-        QMessageBox.warning(self, "No Selection", "Please select at least one row")
+        QMessageBox.warning(
+            self,
+            self._t("common.no_selection", "No Selection"),
+            self._t("trends.select_at_least_one_row", "Please select at least one row"),
+        )
 
     def _require_selected_keywords(self):
         keywords = self._selected_keywords()
@@ -2136,13 +2263,13 @@ class TrendsTab(QWidget):
             self.main_window.handle_send_to_videos(keywords, source_tool="Trends")
             return
         print(f"[Trends] Sent to Video search tool: {keywords}")
-        QMessageBox.information(self, "Trends", "Sent to Video search tool")
+        QMessageBox.information(self, self._t("main.nav.trends", "Trends"), self._t("trends.sent_video", "Sent to Video search tool"))
 
     def _send_to_channel_search_tool(self):
         keywords = self._require_selected_keywords()
         if not keywords:
             return
-        QMessageBox.information(self, "Trends", "Sent to Channel search tool")
+        QMessageBox.information(self, self._t("main.nav.trends", "Trends"), self._t("trends.sent_channel", "Sent to Channel search tool"))
 
     def _send_selected_to_keywords_tool(self):
         keywords = self._require_selected_keywords()
@@ -2151,23 +2278,23 @@ class TrendsTab(QWidget):
         if self.main_window is not None and hasattr(self.main_window, "handle_send_trends_to_keywords"):
             self.main_window.handle_send_trends_to_keywords(keywords, source_tool="Trends")
             return
-        QMessageBox.information(self, "Trends", "Sent selected keywords to Keywords tool")
+        QMessageBox.information(self, self._t("main.nav.trends", "Trends"), self._t("trends.sent_selected_keywords", "Sent selected keywords to Keywords tool"))
 
     def _send_all_to_keywords_tool(self):
         keywords = self._all_keywords()
         if not keywords:
-            QMessageBox.warning(self, "No Data", "No keywords in the table")
+            QMessageBox.warning(self, self._t("common.no_data", "No Data"), self._t("trends.no_keywords_in_table", "No keywords in the table"))
             return
         if self.main_window is not None and hasattr(self.main_window, "handle_send_trends_to_keywords"):
             self.main_window.handle_send_trends_to_keywords(keywords, source_tool="Trends")
             return
-        QMessageBox.information(self, "Trends", "Sent all keywords to Keywords tool")
+        QMessageBox.information(self, self._t("main.nav.trends", "Trends"), self._t("trends.sent_all_keywords", "Sent all keywords to Keywords tool"))
 
     def _get_search_volume_for_selected(self):
         keywords = self._require_selected_keywords()
         if not keywords:
             return
-        QMessageBox.information(self, "Trends", "Getting search volume for selected keywords...")
+        QMessageBox.information(self, self._t("main.nav.trends", "Trends"), self._t("trends.getting_search_volume", "Getting search volume for selected keywords..."))
 
     def _send_selected_to_keywords_everywhere(self):
         keywords = self._require_selected_keywords()
@@ -2618,105 +2745,105 @@ class TrendsTab(QWidget):
 
         self._add_context_action(
             menu,
-            "Send to Video search tool",
+            self._t("trends.menu.send_video", "Send to Video search tool"),
             self._send_to_video_search_tool,
             QStyle.StandardPixmap.SP_MediaPlay,
         )
         self._add_context_action(
             menu,
-            "Send to Channel search tool",
+            self._t("trends.menu.send_channel", "Send to Channel search tool"),
             self._send_to_channel_search_tool,
             QStyle.StandardPixmap.SP_FileDialogInfoView,
         )
         self._add_context_action(
             menu,
-            "Send SELECTED to Keywords tool",
+            self._t("trends.menu.send_selected_keywords", "Send SELECTED to Keywords tool"),
             self._send_selected_to_keywords_tool,
             QStyle.StandardPixmap.SP_ArrowBack,
         )
         self._add_context_action(
             menu,
-            "Send ALL to Keywords tool",
+            self._t("trends.menu.send_all_keywords", "Send ALL to Keywords tool"),
             self._send_all_to_keywords_tool,
             QStyle.StandardPixmap.SP_ArrowLeft,
         )
         self._add_context_action(
             menu,
-            "Get Search Volume",
+            self._t("trends.menu.get_search_volume", "Get Search Volume"),
             self._get_search_volume_for_selected,
             QStyle.StandardPixmap.SP_FileDialogDetailedView,
         )
         self._add_context_action(
             menu,
-            "Send SELECTED to Keywords Everywhere tool",
+            self._t("trends.menu.send_selected_ke", "Send SELECTED to Keywords Everywhere tool"),
             self._send_selected_to_keywords_everywhere,
             QStyle.StandardPixmap.SP_ArrowForward,
         )
         self._add_context_action(
             menu,
-            "Send ALL to Keywords Everywhere tool",
+            self._t("trends.menu.send_all_ke", "Send ALL to Keywords Everywhere tool"),
             self._send_all_to_keywords_everywhere,
             QStyle.StandardPixmap.SP_CommandLink,
         )
         self._add_context_action(
             menu,
-            "Checkboxes",
+            self._t("trends.menu.checkboxes", "Checkboxes"),
             self._toggle_row_selection,
             QStyle.StandardPixmap.SP_DialogApplyButton,
         )
-        filters_menu = QMenu("Filters", menu)
+        filters_menu = QMenu(self._t("common.filters", "Filters"), menu)
         filters_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
 
-        action_kw = filters_menu.addAction("Keyword contains...")
+        action_kw = filters_menu.addAction(self._t("trends.menu.filter_keyword_contains", "Keyword contains..."))
         action_kw.triggered.connect(self._set_keyword_filter_dialog)
 
-        action_country = filters_menu.addAction("Country = selected row")
+        action_country = filters_menu.addAction(self._t("trends.menu.filter_country_selected", "Country = selected row"))
         action_country.triggered.connect(self._set_country_filter_from_selected)
 
-        action_category = filters_menu.addAction("Category = selected row")
+        action_category = filters_menu.addAction(self._t("trends.menu.filter_category_selected", "Category = selected row"))
         action_category.triggered.connect(self._set_category_filter_from_selected)
 
-        action_property = filters_menu.addAction("Property = selected row")
+        action_property = filters_menu.addAction(self._t("trends.menu.filter_property_selected", "Property = selected row"))
         action_property.triggered.connect(self._set_property_filter_from_selected)
 
         filters_menu.addSeparator()
 
-        action_checked_only = filters_menu.addAction("Checked rows only")
+        action_checked_only = filters_menu.addAction(self._t("trends.menu.filter_checked_only", "Checked rows only"))
         action_checked_only.setCheckable(True)
         action_checked_only.setChecked(self._filter_checked_only)
         action_checked_only.triggered.connect(self._toggle_checked_only_filter)
 
         filters_menu.addSeparator()
 
-        clear_keyword = filters_menu.addAction("Clear keyword filter")
+        clear_keyword = filters_menu.addAction(self._t("trends.menu.clear_keyword_filter", "Clear keyword filter"))
         clear_keyword.triggered.connect(self._clear_keyword_filter_only)
 
-        clear_country = filters_menu.addAction("Clear country filter")
+        clear_country = filters_menu.addAction(self._t("trends.menu.clear_country_filter", "Clear country filter"))
         clear_country.triggered.connect(self._clear_country_filter_only)
 
-        clear_category = filters_menu.addAction("Clear category filter")
+        clear_category = filters_menu.addAction(self._t("trends.menu.clear_category_filter", "Clear category filter"))
         clear_category.triggered.connect(self._clear_category_filter_only)
 
-        clear_property = filters_menu.addAction("Clear property filter")
+        clear_property = filters_menu.addAction(self._t("trends.menu.clear_property_filter", "Clear property filter"))
         clear_property.triggered.connect(self._clear_property_filter_only)
 
-        clear_all = filters_menu.addAction("Clear all filters")
+        clear_all = filters_menu.addAction(self._t("trends.menu.clear_all_filters", "Clear all filters"))
         clear_all.triggered.connect(lambda: self._clear_trends_filters(update_ui=True))
 
         menu.addMenu(filters_menu)
 
         menu.addSeparator()
 
-        copy_menu = QMenu("Copy", menu)
+        copy_menu = QMenu(self._t("common.copy", "Copy"), menu)
         copy_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
         copy_items = [
-            "Copy SELECTED rows to clipboard",
-            "Copy ALL rows to clipboard",
-            "Copy HIGHLIGHTED items to clipboard",
-            "Copy SELECTED keywords to clipboard",
-            "Copy ALL keywords to clipboard",
-            "Copy SELECTED comma separated keywords to clipboard",
-            "Copy ALL comma separated keywords to clipboard",
+            self._t("trends.menu.copy_selected_rows", "Copy SELECTED rows to clipboard"),
+            self._t("trends.menu.copy_all_rows", "Copy ALL rows to clipboard"),
+            self._t("trends.menu.copy_highlighted_items", "Copy HIGHLIGHTED items to clipboard"),
+            self._t("trends.menu.copy_selected_keywords", "Copy SELECTED keywords to clipboard"),
+            self._t("trends.menu.copy_all_keywords", "Copy ALL keywords to clipboard"),
+            self._t("trends.menu.copy_selected_keywords_csv", "Copy SELECTED comma separated keywords to clipboard"),
+            self._t("trends.menu.copy_all_keywords_csv", "Copy ALL comma separated keywords to clipboard"),
         ]
         copy_handlers = [
             self._copy_selected_rows_to_clipboard,
@@ -2732,33 +2859,33 @@ class TrendsTab(QWidget):
             sub_action.triggered.connect(lambda _checked=False, cb=handler: cb())
         menu.addMenu(copy_menu)
 
-        hashtags_menu = QMenu("Hashtags", menu)
+        hashtags_menu = QMenu(self._t("common.hashtags", "Hashtags"), menu)
         hashtags_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        hash_action = hashtags_menu.addAction("Hashtags options")
+        hash_action = hashtags_menu.addAction(self._t("trends.menu.hashtag_options", "Hashtags options"))
         hash_action.triggered.connect(lambda _checked=False: self._show_next_steps_message())
         menu.addMenu(hashtags_menu)
 
-        search_menu = QMenu("Search", menu)
+        search_menu = QMenu(self._t("common.search", "Search"), menu)
         search_menu.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
-        search_menu.addMenu(self._build_search_scope_submenu(search_menu, "Current row", self._search_current_row_with_engine))
-        search_menu.addMenu(self._build_search_scope_submenu(search_menu, "SELECTED rows", self._search_selected_with_engine))
-        search_menu.addMenu(self._build_search_scope_submenu(search_menu, "ALL rows", self._search_all_with_engine))
+        search_menu.addMenu(self._build_search_scope_submenu(search_menu, self._t("trends.menu.current_row", "Current row"), self._search_current_row_with_engine))
+        search_menu.addMenu(self._build_search_scope_submenu(search_menu, self._t("trends.menu.selected_rows", "SELECTED rows"), self._search_selected_with_engine))
+        search_menu.addMenu(self._build_search_scope_submenu(search_menu, self._t("trends.menu.all_rows", "ALL rows"), self._search_all_with_engine))
         menu.addMenu(search_menu)
         self._add_context_action(
             menu,
-            "Auto-fit column widths",
+            self._t("trends.menu.auto_fit", "Auto-fit column widths"),
             self._auto_fit_trends_column_widths,
             QStyle.StandardPixmap.SP_TitleBarShadeButton,
         )
         self._add_context_action(
             menu,
-            "Reset column widths",
+            self._t("trends.menu.reset_widths", "Reset column widths"),
             self._reset_trends_column_widths,
             QStyle.StandardPixmap.SP_BrowserReload,
         )
         self._add_context_action(
             menu,
-            "Delete",
+            self._t("common.delete", "Delete"),
             self._delete_selected_rows_with_confirm,
             QStyle.StandardPixmap.SP_TrashIcon,
         )
@@ -2766,7 +2893,7 @@ class TrendsTab(QWidget):
         menu.exec(self.trends_table.viewport().mapToGlobal(pos))
 
     def open_settings_dialog(self):
-        dialog = TrendsSettingsDialog(self.trends_settings, self)
+        dialog = TrendsSettingsDialog(self.trends_settings, language=self.current_language, parent=self)
         if dialog.exec():
             self.trends_settings = dialog.get_settings()
             if self.main_window is not None and hasattr(self.main_window, "set_proxy_runtime_settings"):

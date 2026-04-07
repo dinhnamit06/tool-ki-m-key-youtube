@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import (
+﻿from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QFrame, QSizePolicy, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QMenu, QCheckBox, QApplication, QSpinBox, QTextEdit, QFileDialog
@@ -10,6 +10,7 @@ import random
 import re
 
 from utils.constants import REQUESTS_INSTALLED
+from utils.i18n import DEFAULT_LANGUAGE, translate
 from core.keyword_generator import generate_keywords_api
 from ui.components import ImportVolumeDialog
 
@@ -19,6 +20,7 @@ class KeywordsTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window # Reference to main app for status bar etc.
+        self.current_language = getattr(main_window, "current_language", DEFAULT_LANGUAGE)
         self.select_all_state = False
         self._model_value_by_label = {}
         self.setup_ui()
@@ -29,10 +31,10 @@ class KeywordsTab(QWidget):
         content_layout.setSpacing(25)
         
         # Header
-        header_label = QLabel("Keywords Tool")
-        header_label.setObjectName("header_label")
-        header_label.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        content_layout.addWidget(header_label)
+        self.header_label = QLabel("Keywords Tool")
+        self.header_label.setObjectName("header_label")
+        self.header_label.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
+        content_layout.addWidget(self.header_label)
         
         # Input Row Container
         input_frame = QFrame()
@@ -48,16 +50,16 @@ class KeywordsTab(QWidget):
         seed_layout.setSpacing(8)
         
         seed_label_layout = QHBoxLayout()
-        seed_label = QLabel("Seed keyword(s):")
-        seed_label.setObjectName("input_label")
+        self.seed_label = QLabel("Seed keyword(s):")
+        self.seed_label.setObjectName("input_label")
         
-        question_icon = QLabel("?")
-        question_icon.setObjectName("question_icon")
-        question_icon.setFixedSize(16, 16)
-        question_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.seed_help_icon = QLabel("?")
+        self.seed_help_icon.setObjectName("question_icon")
+        self.seed_help_icon.setFixedSize(16, 16)
+        self.seed_help_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        seed_label_layout.addWidget(seed_label)
-        seed_label_layout.addWidget(question_icon)
+        seed_label_layout.addWidget(self.seed_label)
+        seed_label_layout.addWidget(self.seed_help_icon)
         seed_label_layout.addStretch()
         
         self.seed_input = QLineEdit()
@@ -73,8 +75,8 @@ class KeywordsTab(QWidget):
         country_layout = QVBoxLayout()
         country_layout.setSpacing(8)
         
-        country_label = QLabel("Country:")
-        country_label.setObjectName("input_label")
+        self.country_label = QLabel("Country:")
+        self.country_label.setObjectName("input_label")
         self.country_combo = QComboBox()
         self.country_combo.addItems([
             "Worldwide", "United States", "Viet Nam", "United Kingdom", "Japan", "South Korea", 
@@ -84,35 +86,35 @@ class KeywordsTab(QWidget):
         self.country_combo.setMinimumHeight(42)
         self.country_combo.setMinimumWidth(120)
         
-        country_layout.addWidget(country_label)
+        country_layout.addWidget(self.country_label)
         country_layout.addWidget(self.country_combo)
         
         # --- Search Range Section ---
         range_layout = QVBoxLayout()
         range_layout.setSpacing(8)
         
-        range_label = QLabel("Search range:")
-        range_label.setObjectName("input_label")
+        self.range_label = QLabel("Search range:")
+        self.range_label.setObjectName("input_label")
         self.range_combo = QComboBox()
         self.range_combo.addItems(["a - z, 0 - 9 (after seed keyword)", "a - z (after seed keyword)", "0 - 9 (after seed keyword)"])
         self.range_combo.setMinimumHeight(42)
         self.range_combo.setMinimumWidth(210)
         
-        range_layout.addWidget(range_label)
+        range_layout.addWidget(self.range_label)
         range_layout.addWidget(self.range_combo)
 
         # --- Model Section ---
         model_layout = QVBoxLayout()
         model_layout.setSpacing(8)
 
-        model_label = QLabel("Model:")
-        model_label.setObjectName("input_label")
+        self.model_label = QLabel("Model:")
+        self.model_label.setObjectName("input_label")
         self.model_combo = QComboBox()
         self.model_combo.setMinimumHeight(42)
         self.model_combo.setMinimumWidth(180)
         self._setup_gemini_model_choices()
 
-        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_label)
         model_layout.addWidget(self.model_combo)
 
         # --- Prompt Mode Section ---
@@ -120,13 +122,13 @@ class KeywordsTab(QWidget):
         prompt_mode_layout.setSpacing(8)
 
         prompt_mode_label_layout = QHBoxLayout()
-        prompt_mode_label = QLabel("Prompt Mode:")
-        prompt_mode_label.setObjectName("input_label")
+        self.prompt_mode_label = QLabel("Prompt Mode:")
+        self.prompt_mode_label.setObjectName("input_label")
         self.prompt_mode_help_icon = QLabel("?")
         self.prompt_mode_help_icon.setObjectName("question_icon")
         self.prompt_mode_help_icon.setFixedSize(16, 16)
         self.prompt_mode_help_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        prompt_mode_label_layout.addWidget(prompt_mode_label)
+        prompt_mode_label_layout.addWidget(self.prompt_mode_label)
         prompt_mode_label_layout.addWidget(self.prompt_mode_help_icon)
         prompt_mode_label_layout.addStretch()
         self.prompt_mode_combo = QComboBox()
@@ -153,8 +155,8 @@ class KeywordsTab(QWidget):
         count_layout = QVBoxLayout()
         count_layout.setSpacing(8)
 
-        count_label = QLabel("Keyword count:")
-        count_label.setObjectName("input_label")
+        self.count_label = QLabel("Keyword count:")
+        self.count_label.setObjectName("input_label")
         self.count_spin = QSpinBox()
         self.count_spin.setRange(10, 500)
         self.count_spin.setSingleStep(10)
@@ -186,11 +188,11 @@ class KeywordsTab(QWidget):
             }
         """)
 
-        count_layout.addWidget(count_label)
+        count_layout.addWidget(self.count_label)
         count_layout.addWidget(self.count_spin)
         
         # --- Generate Button ---
-        self.generate_btn = QPushButton("✓ Generate")
+        self.generate_btn = QPushButton("âœ“ Generate")
         self.generate_btn.setObjectName("generate_btn")
         self.generate_btn.setMinimumHeight(42)
         self.generate_btn.setMinimumWidth(150)
@@ -226,8 +228,8 @@ class KeywordsTab(QWidget):
         custom_prompt_layout.setSpacing(10)
 
         custom_prompt_header = QHBoxLayout()
-        custom_prompt_label = QLabel("Custom Prompt:")
-        custom_prompt_label.setObjectName("input_label")
+        self.custom_prompt_label = QLabel("Custom Prompt:")
+        self.custom_prompt_label.setObjectName("input_label")
         self.custom_prompt_hint = QLabel("Used only when Prompt Mode = Custom")
         self.custom_prompt_hint.setObjectName("selection_label")
         self.custom_prompt_hint.setStyleSheet("color: #9a9a9a; font-size: 12px;")
@@ -256,7 +258,7 @@ class KeywordsTab(QWidget):
         self.custom_prompt_load_btn.setMinimumWidth(105)
         self.custom_prompt_random_btn.setMinimumWidth(118)
         self.custom_prompt_similar_btn.setMinimumWidth(112)
-        custom_prompt_header.addWidget(custom_prompt_label)
+        custom_prompt_header.addWidget(self.custom_prompt_label)
         custom_prompt_header.addStretch()
         custom_prompt_header.addWidget(self.custom_prompt_hint)
         custom_prompt_header.addWidget(self.custom_prompt_random_btn)
@@ -307,7 +309,7 @@ class KeywordsTab(QWidget):
         self.table = QTableWidget()
         self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["[ Click ] All", "🔍 Rank", "🔍 Word Count", "🔍 Character Count", "🔍 Seed", "🔍 Keyword"])
+        self.table.setHorizontalHeaderLabels(self._translated_table_headers())
         self.table.horizontalHeader().sectionClicked.connect(self.handle_header_clicked)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
@@ -350,11 +352,11 @@ class KeywordsTab(QWidget):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(20)
         
-        self.toggle_bilingual = QCheckBox("Song ngữ")
+        self.toggle_bilingual = QCheckBox("Bilingual")
         self.toggle_bilingual.setObjectName("toggle_switch")
         self.toggle_bilingual.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        self.selection_label = QLabel("Total Items: 0  |  Selected rows: 0")
+        self.selection_label = QLabel("")
         self.selection_label.setObjectName("selection_label")
         self.selection_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.selection_label.setStyleSheet("color: #bbbbbb;")
@@ -385,6 +387,61 @@ class KeywordsTab(QWidget):
             
         bottom_layout.addWidget(bottom_right_widget)
         content_layout.addWidget(bottom_toolbar)
+        self.apply_language(self.current_language)
+
+    def _t(self, key, default=None, **kwargs):
+        return translate(self.current_language, key, default=default, **kwargs)
+
+    def _translated_table_headers(self):
+        return [
+            f"[ Click ] {self._t('keywords.table.all', 'All')}",
+            self._t("keywords.table.rank", "Rank"),
+            self._t("keywords.table.word_count", "Word Count"),
+            self._t("keywords.table.character_count", "Character Count"),
+            self._t("keywords.table.seed", "Seed"),
+            self._t("keywords.table.keyword", "Keyword"),
+        ]
+
+    def apply_language(self, language):
+        self.current_language = str(language or DEFAULT_LANGUAGE).strip().lower() or DEFAULT_LANGUAGE
+
+        self.header_label.setText(self._t("keywords.title", "Keywords Tool"))
+        self.seed_label.setText(self._t("keywords.seed", "Seed keyword(s):"))
+        self.seed_input.setPlaceholderText(self._t("keywords.seed_placeholder", "Enter seed keyword (e.g. dog toy or dog * toy)"))
+        self.country_label.setText(self._t("keywords.country", "Country:"))
+        self.range_label.setText(self._t("keywords.search_range", "Search range:"))
+        self.model_label.setText(self._t("keywords.model", "Model:"))
+        self.prompt_mode_label.setText(self._t("keywords.prompt_mode", "Prompt Mode:"))
+        self.count_label.setText(self._t("keywords.keyword_count", "Keyword count:"))
+        self.generate_btn.setText(self._t("keywords.generate", "Generate"))
+        self.custom_prompt_label.setText(self._t("keywords.custom_prompt", "Custom Prompt:"))
+        self.custom_prompt_hint.setText(self._t("keywords.custom_prompt_hint", "Used only when Prompt Mode = Custom"))
+        self.custom_prompt_save_btn.setText(self._t("keywords.custom_save", "Save Prompt"))
+        self.custom_prompt_load_btn.setText(self._t("keywords.custom_load", "Load Prompt"))
+        self.custom_prompt_random_btn.setText(self._t("keywords.custom_random", "Random Prompt"))
+        self.custom_prompt_similar_btn.setText(self._t("keywords.custom_similar", "Similar Prompt"))
+        self.custom_prompt_toggle_btn.setText(
+            self._t("keywords.custom_toggle_show", "Show")
+            if getattr(self, "_custom_prompt_collapsed", False)
+            else self._t("keywords.custom_toggle_hide", "Hide")
+        )
+        self.custom_prompt_input.setPlaceholderText(
+            self._t(
+                "keywords.custom_placeholder",
+                "Paste your custom English prompt here. This is UI only for now; backend will be connected in the next step.",
+            )
+        )
+        self.btn_volume.setText(self._t("keywords.volume_data", "Volume Data"))
+        self.toggle_bilingual.setText(self._t("keywords.bilingual", "Bilingual"))
+        self.btn_file.setText(self._t("keywords.file", "File"))
+        self.btn_filters.setText(self._t("keywords.filters", "Filters"))
+        self.btn_clear.setText(self._t("keywords.clear", "Clear"))
+
+        self.table.setHorizontalHeaderLabels(self._translated_table_headers())
+        self.setup_volume_menu()
+        self.setup_file_menu()
+        self.update_selection_count()
+        self._handle_prompt_mode_ui(self.prompt_mode_combo.currentText())
 
     def setup_volume_menu(self):
         menu_vol = QMenu(self.btn_volume)
@@ -393,18 +450,18 @@ class KeywordsTab(QWidget):
             QMenu::item { padding: 8px 25px 8px 20px; }
             QMenu::item:selected { background-color: #e50914; color: #ffffff; }
         """)
-        action_import = menu_vol.addAction("Import search volume data")
+        action_import = menu_vol.addAction(self._t("keywords.volume.import", "Import search volume data"))
         action_import.triggered.connect(self.open_import_volume_dialog)
         
-        ke_menu = menu_vol.addMenu("Keywords Everywhere")
+        ke_menu = menu_vol.addMenu(self._t("keywords.volume.ke", "Keywords Everywhere"))
         ke_menu.setStyleSheet("""
             QMenu { background-color: #2b2b2b; color: #ffffff; border: 1px solid #444444; }
             QMenu::item { padding: 8px 25px 8px 20px; }
             QMenu::item:selected { background-color: #e50914; color: #ffffff; }
         """)
-        action_ke_selected = ke_menu.addAction("Send SELECTED to Keywords Everywhere tool")
-        action_ke_all = ke_menu.addAction("Send ALL to Keywords Everywhere tool")
-        action_ke_open = ke_menu.addAction("Open the Keywords Everywhere tool")
+        action_ke_selected = ke_menu.addAction(self._t("keywords.volume.ke_selected", "Send SELECTED to Keywords Everywhere tool"))
+        action_ke_all = ke_menu.addAction(self._t("keywords.volume.ke_all", "Send ALL to Keywords Everywhere tool"))
+        action_ke_open = ke_menu.addAction(self._t("keywords.volume.ke_open", "Open the Keywords Everywhere tool"))
         
         action_ke_selected.triggered.connect(lambda: self.mock_action("Send SELECTED to Keywords Everywhere tool"))
         action_ke_all.triggered.connect(lambda: self.mock_action("Send ALL to Keywords Everywhere tool"))
@@ -419,11 +476,11 @@ class KeywordsTab(QWidget):
             QMenu::item { padding: 8px 25px 8px 20px; }
             QMenu::item:selected { background-color: #e50914; color: #ffffff; }
         """)
-        action_csv = menu_file.addAction("Save to CSV")
-        action_excel = menu_file.addAction("Save to Excel")
-        action_txt = menu_file.addAction("Save to TXT")
+        action_csv = menu_file.addAction(self._t("keywords.file.csv", "Save to CSV"))
+        action_excel = menu_file.addAction(self._t("keywords.file.excel", "Save to Excel"))
+        action_txt = menu_file.addAction(self._t("keywords.file.txt", "Save to TXT"))
         menu_file.addSeparator()
-        action_copy_all = menu_file.addAction("Copy ALL Keywords")
+        action_copy_all = menu_file.addAction(self._t("keywords.file.copy_all", "Copy ALL Keywords"))
         
         self.btn_file.setMenu(menu_file)
         
@@ -444,34 +501,66 @@ class KeywordsTab(QWidget):
             self.custom_prompt_frame.setVisible(is_custom)
         if is_custom and hasattr(self, "custom_prompt_body"):
             self.custom_prompt_body.setVisible(not getattr(self, "_custom_prompt_collapsed", False))
-            self.custom_prompt_toggle_btn.setText("Show" if getattr(self, "_custom_prompt_collapsed", False) else "Hide")
+            self.custom_prompt_toggle_btn.setText(
+                self._t("keywords.custom_toggle_show", "Show")
+                if getattr(self, "_custom_prompt_collapsed", False)
+                else self._t("keywords.custom_toggle_hide", "Hide")
+            )
 
     def _prompt_mode_hint_text(self, mode_text):
         normalized = str(mode_text or "").strip().lower()
         if normalized == "balanced v2":
-            return "Legacy balanced behavior before the newer seed-preserving rules and seed-biased ranking were added."
+            return self._t(
+                "keywords.mode.balanced_v2",
+                "Legacy balanced behavior before the newer seed-preserving rules and seed-biased ranking were added.",
+            )
         if normalized == "broad seed":
-            return "Broad parent-topic ideas. Good when the seed is still large and you want scalable branches."
+            return self._t(
+                "keywords.mode.broad_seed",
+                "Broad parent-topic ideas. Good when the seed is still large and you want scalable branches.",
+            )
         if normalized == "sub niche":
-            return "Return child niches under the main topic. Standalone niche terms are allowed and do not need to repeat the parent seed."
+            return self._t(
+                "keywords.mode.sub_niche",
+                "Return child niches under the main topic. Standalone niche terms are allowed and do not need to repeat the parent seed.",
+            )
         if normalized == "micro niche":
-            return "Return very specific subtopics, problems, or audience slices inside the topic. No need to keep the parent seed at the front."
+            return self._t(
+                "keywords.mode.micro_niche",
+                "Return very specific subtopics, problems, or audience slices inside the topic. No need to keep the parent seed at the front.",
+            )
         if normalized == "deep niche":
-            return "Go one to two levels deeper into subtopics, audience slices, and content angles."
+            return self._t(
+                "keywords.mode.deep_niche",
+                "Go one to two levels deeper into subtopics, audience slices, and content angles.",
+            )
         if normalized == "micro niche expansion":
-            return "Best for niche-of-niche seeds like 'fish gaming'. Forces sharper sub-angles, formats, audiences, and use cases."
+            return self._t(
+                "keywords.mode.micro_niche_expansion",
+                "Best for niche-of-niche seeds like 'fish gaming'. Forces sharper sub-angles, formats, audiences, and use cases.",
+            )
         if normalized == "seed expansion only":
-            return "Keep the original seed phrase in almost every output and mainly expand with strong modifiers like at home, business, setup, cost, tips, or for beginners."
+            return self._t(
+                "keywords.mode.seed_expansion_only",
+                "Keep the original seed phrase in almost every output and mainly expand with strong modifiers like at home, business, setup, cost, tips, or for beginners.",
+            )
         if normalized == "custom":
-            return "Use your own English prompt directly."
-        return "Balanced mix of scalable opportunities and specific sub-niche ideas."
+            return self._t("keywords.mode.custom", "Use your own English prompt directly.")
+        return self._t(
+            "keywords.mode.balanced",
+            "Balanced mix of scalable opportunities and specific sub-niche ideas.",
+        )
 
     def _toggle_custom_prompt_body(self):
         self._custom_prompt_collapsed = not getattr(self, "_custom_prompt_collapsed", False)
         if hasattr(self, "custom_prompt_body"):
             self.custom_prompt_body.setVisible(not self._custom_prompt_collapsed)
         if hasattr(self, "custom_prompt_toggle_btn"):
-            self.custom_prompt_toggle_btn.setText("Show" if self._custom_prompt_collapsed else "Hide")
+            self.custom_prompt_toggle_btn.setText(
+                self._t("keywords.custom_toggle_show", "Show")
+                if self._custom_prompt_collapsed
+                else self._t("keywords.custom_toggle_hide", "Hide")
+            )
 
     def _save_custom_prompt(self):
         prompt_text = self._get_custom_prompt_text() if hasattr(self, "_get_custom_prompt_text") else ""
@@ -700,7 +789,11 @@ class KeywordsTab(QWidget):
 
     def generate_keywords(self):
         if not REQUESTS_INSTALLED:
-            QMessageBox.critical(self, "Missing Dependency", "The 'requests' module is missing. Please run:\n\npip install requests")
+            QMessageBox.critical(
+                self,
+                self._t("common.missing_dependency", "Missing Dependency"),
+                "The 'requests' module is missing. Please run:\n\npip install requests",
+            )
             return
 
         seed_text = self.seed_input.text().strip()
@@ -711,13 +804,21 @@ class KeywordsTab(QWidget):
         prompt_mode = self._selected_prompt_mode()
         prompt_mode_raw = self.prompt_mode_combo.currentText().strip() if hasattr(self, "prompt_mode_combo") else prompt_mode
         if not seed_text:
-            QMessageBox.warning(self, "Empty Input", "Please enter a seed keyword first.")
+            QMessageBox.warning(
+                self,
+                self._t("keywords.empty_input_title", "Empty Input"),
+                self._t("keywords.empty_input_message", "Please enter a seed keyword first."),
+            )
             return
         if str(prompt_mode_raw or "").strip().lower() == "custom" and not self._get_custom_prompt_text():
-            QMessageBox.warning(self, "Empty Custom Prompt", "Please enter a custom prompt first.")
+            QMessageBox.warning(
+                self,
+                self._t("keywords.custom_empty_title", "Empty Custom Prompt"),
+                self._t("keywords.custom_empty_message", "Please enter a custom prompt first."),
+            )
             return
             
-        self.generate_btn.setText("Generating...")
+        self.generate_btn.setText(self._t("keywords.generating", "Generating..."))
         self.generate_btn.setEnabled(False)
         QApplication.processEvents()
         
@@ -732,12 +833,11 @@ class KeywordsTab(QWidget):
             content = generate_keywords_api(prompt, provider=provider, model_name=model_name)
             generated_list = self._parse_generated_keywords(content, target_count)
         except Exception as e:
-            QMessageBox.critical(self, "API Error", str(e))
+            QMessageBox.critical(self, self._t("common.api_error", "API Error"), str(e))
             generated_list = []
         finally:
-            self.generate_btn.setText("✓ Generate")
             self.generate_btn.setEnabled(True)
-            self.generate_btn.setText("Generate")
+            self.generate_btn.setText(self._t("keywords.generate", "Generate"))
             
         if not generated_list:
             return
@@ -1303,7 +1403,8 @@ Output rules:
             self.table.setItem(row, 6, vol_item)
         self.select_all_state = False
         header_item = self.table.horizontalHeaderItem(0)
-        if header_item: header_item.setText("[ ] All")
+        if header_item:
+            header_item.setText(f"[ ] {self._t('keywords.table.all', 'All')}")
         self.table.blockSignals(False)
         self.update_selection_count()
 
@@ -1312,7 +1413,9 @@ Output rules:
             self.select_all_state = not self.select_all_state
             new_state = Qt.CheckState.Checked if self.select_all_state else Qt.CheckState.Unchecked
             header_item = self.table.horizontalHeaderItem(0)
-            if header_item: header_item.setText("[x] All" if self.select_all_state else "[ ] All")
+            if header_item:
+                all_text = self._t("keywords.table.all", "All")
+                header_item.setText(f"[x] {all_text}" if self.select_all_state else f"[ ] {all_text}")
             self.table.blockSignals(True)
             for row in range(self.table.rowCount()):
                 item = self.table.item(row, 0)
@@ -1336,7 +1439,9 @@ Output rules:
     def update_selection_count(self):
         count = sum(1 for row in range(self.table.rowCount()) if self.table.item(row, 0) and self.table.item(row, 0).checkState() == Qt.CheckState.Checked)
         total = self.table.rowCount()
-        self.selection_label.setText(f"Total Items: {total}  |  Selected rows: {count}")
+        self.selection_label.setText(
+            self._t("keywords.selection", "Total Items: {total}  |  Selected rows: {selected}", total=total, selected=count)
+        )
 
     def show_context_menu(self, position):
         menu = QMenu(self.table)
@@ -1474,7 +1579,7 @@ Output rules:
         try:
             import pandas as pd
             data = [[self.table.item(r,c).text() if self.table.item(r,c) else "" for c in range(1, self.table.columnCount())] for r in range(self.table.rowCount())]
-            h = [self.table.horizontalHeaderItem(c).text().replace("🔍 ","") for c in range(1, self.table.columnCount())]
+            h = [self.table.horizontalHeaderItem(c).text().replace("ðŸ” ","") for c in range(1, self.table.columnCount())]
             df = pd.DataFrame(data, columns=h)
             path, _ = QFileDialog.getSaveFileName(self, f"Save {fmt.upper()}", "", f"{fmt.upper()} Files (*.{fmt})")
             if path:
@@ -1524,3 +1629,4 @@ Output rules:
                 m += 1
         self.table.blockSignals(False)
         return m
+
