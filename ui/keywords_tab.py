@@ -119,21 +119,34 @@ class KeywordsTab(QWidget):
         prompt_mode_layout = QVBoxLayout()
         prompt_mode_layout.setSpacing(8)
 
+        prompt_mode_label_layout = QHBoxLayout()
         prompt_mode_label = QLabel("Prompt Mode:")
         prompt_mode_label.setObjectName("input_label")
+        self.prompt_mode_help_icon = QLabel("?")
+        self.prompt_mode_help_icon.setObjectName("question_icon")
+        self.prompt_mode_help_icon.setFixedSize(16, 16)
+        self.prompt_mode_help_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        prompt_mode_label_layout.addWidget(prompt_mode_label)
+        prompt_mode_label_layout.addWidget(self.prompt_mode_help_icon)
+        prompt_mode_label_layout.addStretch()
         self.prompt_mode_combo = QComboBox()
         self.prompt_mode_combo.addItems([
             "Balanced",
+            "Balanced v2",
             "Broad Seed",
+            "Sub Niche",
+            "Micro Niche",
             "Deep Niche",
+            "Micro Niche Expansion",
+            "Seed Expansion Only",
             "Custom",
         ])
         self.prompt_mode_combo.setCurrentText("Balanced")
         self.prompt_mode_combo.setMinimumHeight(42)
         self.prompt_mode_combo.setMinimumWidth(150)
-        self.prompt_mode_combo.setToolTip("UI only for now. Prompt behavior is unchanged.")
+        self.prompt_mode_combo.setToolTip("Choose how aggressively Gemini should expand the seed keyword.")
 
-        prompt_mode_layout.addWidget(prompt_mode_label)
+        prompt_mode_layout.addLayout(prompt_mode_label_layout)
         prompt_mode_layout.addWidget(self.prompt_mode_combo)
 
         # --- Count Section ---
@@ -421,11 +434,37 @@ class KeywordsTab(QWidget):
 
     def _handle_prompt_mode_ui(self, mode_text):
         is_custom = str(mode_text or "").strip().lower() == "custom"
+        hint_text = self._prompt_mode_hint_text(mode_text)
+        if hasattr(self, "prompt_mode_help_icon"):
+            self.prompt_mode_help_icon.setToolTip(hint_text)
+            self.prompt_mode_help_icon.setStatusTip(hint_text)
+        if hasattr(self, "prompt_mode_combo"):
+            self.prompt_mode_combo.setToolTip(hint_text)
         if hasattr(self, "custom_prompt_frame"):
             self.custom_prompt_frame.setVisible(is_custom)
         if is_custom and hasattr(self, "custom_prompt_body"):
             self.custom_prompt_body.setVisible(not getattr(self, "_custom_prompt_collapsed", False))
             self.custom_prompt_toggle_btn.setText("Show" if getattr(self, "_custom_prompt_collapsed", False) else "Hide")
+
+    def _prompt_mode_hint_text(self, mode_text):
+        normalized = str(mode_text or "").strip().lower()
+        if normalized == "balanced v2":
+            return "Legacy balanced behavior before the newer seed-preserving rules and seed-biased ranking were added."
+        if normalized == "broad seed":
+            return "Broad parent-topic ideas. Good when the seed is still large and you want scalable branches."
+        if normalized == "sub niche":
+            return "Return child niches under the main topic. Standalone niche terms are allowed and do not need to repeat the parent seed."
+        if normalized == "micro niche":
+            return "Return very specific subtopics, problems, or audience slices inside the topic. No need to keep the parent seed at the front."
+        if normalized == "deep niche":
+            return "Go one to two levels deeper into subtopics, audience slices, and content angles."
+        if normalized == "micro niche expansion":
+            return "Best for niche-of-niche seeds like 'fish gaming'. Forces sharper sub-angles, formats, audiences, and use cases."
+        if normalized == "seed expansion only":
+            return "Keep the original seed phrase in almost every output and mainly expand with strong modifiers like at home, business, setup, cost, tips, or for beginners."
+        if normalized == "custom":
+            return "Use your own English prompt directly."
+        return "Balanced mix of scalable opportunities and specific sub-niche ideas."
 
     def _toggle_custom_prompt_body(self):
         self._custom_prompt_collapsed = not getattr(self, "_custom_prompt_collapsed", False)
@@ -720,6 +759,18 @@ class KeywordsTab(QWidget):
     def _build_keyword_generation_prompt(self, seed_text, target_country, target_count, bilingual=False, prompt_mode="Balanced"):
         seed_scope = self._classify_seed_scope(seed_text)
         normalized_mode = self._normalize_prompt_mode(prompt_mode)
+        if normalized_mode == "balanced v2":
+            return self._build_legacy_balanced_prompt(
+                seed_text=seed_text,
+                target_country=target_country,
+                target_count=target_count,
+                bilingual=bilingual,
+                seed_scope=seed_scope,
+            )
+
+        normalized_seed = " ".join(str(seed_text or "").strip().lower().split())
+        seed_tokens = [token for token in normalized_seed.split() if token]
+        preserve_seed_phrase = len(seed_tokens) >= 2 and "*" not in normalized_seed
         native_rules = ""
         if target_country != "Worldwide":
             native_rules = (
@@ -739,6 +790,35 @@ class KeywordsTab(QWidget):
                 "- Bilingual mode: output each keyword as `native language keyword - English translation`.\n"
             )
 
+        seed_phrase_rules = ""
+        if preserve_seed_phrase:
+            seed_phrase_rules = (
+                f"- The seed phrase `{seed_text}` is already a meaningful niche phrase.\n"
+                f"- Keep the core phrase `{seed_text}` or a very close direct variant in MOST outputs.\n"
+                "- Expand mainly by adding high-intent modifiers after or around the seed phrase, such as:\n"
+                "  - at home\n"
+                "  - business\n"
+                "  - for beginners\n"
+                "  - setup\n"
+                "  - equipment\n"
+                "  - cost\n"
+                "  - profit\n"
+                "  - tutorial\n"
+                "  - guide\n"
+                "  - ideas\n"
+                "  - tips\n"
+                "  - mistakes\n"
+                "  - method\n"
+                "  - indoor\n"
+                "  - backyard\n"
+                "- Do NOT drift too far into adjacent topics unless they are still obviously inside the seed phrase.\n"
+                f"- Good example style for `{seed_text}`: `{seed_text} at home`, `{seed_text} business`, `{seed_text} for beginners`, `{seed_text} setup`, `{seed_text} profit`.\n"
+            )
+
+        extra_seed_specific_rule = (
+            "- If the seed is already narrow or weirdly specific, expand into actual content angles, not shallow paraphrases of the same phrase.\n"
+        )
+
         if normalized_mode == "broad seed":
             scope_rules = (
                 "- Prompt mode: BROAD SEED.\n"
@@ -749,6 +829,26 @@ class KeywordsTab(QWidget):
                 "- Prefer a healthy mix of short root terms, strong problem terms, and only some broader phrases.\n"
                 "- Example behavior for broad topics: `health` should produce outputs closer to `cramp`, `sleep`, `anxiety`, `weight loss`, `gut health`, not overly detailed micro-angles.\n"
             )
+        elif normalized_mode == "sub niche":
+            scope_rules = (
+                "- Prompt mode: SUB NICHE.\n"
+                "- Return strong child niches that sit one layer below the parent topic.\n"
+                "- Standalone sub-niche terms are allowed and often preferred.\n"
+                "- Do NOT force the parent seed to appear in every keyword.\n"
+                "- Favor distinct niche branches, not tiny wording variations.\n"
+                "- Good example behavior: if the seed is `health`, outputs can look like `cramps`, `sleep`, `anxiety`, `gut health`, `weight loss`, `hormones`, `skin care`.\n"
+                "- Each output should still feel like a real YouTube niche or search direction, not a random vague word.\n"
+            )
+        elif normalized_mode == "micro niche":
+            scope_rules = (
+                "- Prompt mode: MICRO NICHE.\n"
+                "- Return very specific subtopics, problems, audience slices, or intent phrases inside the topic.\n"
+                "- Do NOT force the parent seed to appear in every output.\n"
+                "- Go deeper than sub-niche mode, but keep every output human-searchable.\n"
+                "- Favor terms with sharp intent, concrete use case, or obvious video angle.\n"
+                "- Good example behavior: if the seed is `health`, outputs can look like `leg cramps at night`, `high cortisol symptoms`, `insulin resistance signs`, `period cramps relief`, `sleep anxiety`, `bloating after eating`.\n"
+                "- Avoid generic filler and avoid full sentence outputs.\n"
+            )
         elif normalized_mode == "deep niche":
             scope_rules = (
                 "- Prompt mode: DEEP NICHE.\n"
@@ -756,6 +856,52 @@ class KeywordsTab(QWidget):
                 "- Favor keywords that can still support repeatable series, but allow narrower search opportunities.\n"
                 "- It is acceptable to return more detailed and more specific YouTube search phrases than the balanced mode.\n"
                 "- If the seed is already specific, expand it further into adjacent sub-problems, use cases, and audience slices.\n"
+                "- For already-good niche phrases, prefer modifier expansions before jumping to loosely related adjacent branches.\n"
+            )
+        elif normalized_mode == "micro niche expansion":
+            scope_rules = (
+                "- Prompt mode: MICRO NICHE EXPANSION.\n"
+                "- Treat the seed as a niche-of-a-niche starting point and expand downward into very specific, usable YouTube content branches.\n"
+                "- Do NOT just paraphrase the seed keyword with tiny wording changes.\n"
+                "- First priority: produce strong seed-preserving expansions with useful modifiers and intents.\n"
+                "- Second priority: only after that, add a few tighter sub-angles that are still clearly inside the same niche.\n"
+                "- For most outputs, add a real angle such as:\n"
+                "  - audience slice\n"
+                "  - subgenre or subtopic\n"
+                "  - challenge or series format\n"
+                "  - beginner vs advanced intent\n"
+                "  - platform, device, game title, tool, or version\n"
+                "  - problem, goal, mechanic, or use case\n"
+                "  - comparison, mod, build, strategy, tutorial, or trend angle\n"
+                "- If the seed already combines a topic with a parent niche, push into subtopics inside that combination.\n"
+                "- Example behavior: for `fish gaming`, move toward outputs like specific fish game genres, fishing game mobile, fishing simulator beginner tips, fish game challenge ideas, fish game shorts ideas, cozy fishing games, fishing game pc, not just `fish gaming channel` or `fish gaming videos`.\n"
+                "- At least 70 percent of the outputs should contain a real modifier, sub-angle, or use-case beyond the raw seed phrase.\n"
+                "- Favor ideas that still feel searchable by humans and can become repeatable series, not random brainstorm fragments.\n"
+            )
+        elif normalized_mode == "seed expansion only":
+            scope_rules = (
+                "- Prompt mode: SEED EXPANSION ONLY.\n"
+                f"- Keep the exact seed phrase `{seed_text}` in almost every output.\n"
+                "- Your main job is to expand the seed by adding useful modifiers, not by drifting into adjacent topics.\n"
+                "- Strong modifier examples include:\n"
+                "  - at home\n"
+                "  - business\n"
+                "  - for beginners\n"
+                "  - setup\n"
+                "  - equipment\n"
+                "  - cost\n"
+                "  - profit\n"
+                "  - mistakes\n"
+                "  - tutorial\n"
+                "  - tips\n"
+                "  - guide\n"
+                "  - ideas\n"
+                "  - strategy\n"
+                "  - indoor\n"
+                "  - backyard\n"
+                "- At least 80 percent of the outputs should contain the full seed phrase plus one or more meaningful modifiers.\n"
+                "- Avoid adjacent branches unless they still visibly preserve the seed phrase.\n"
+                f"- Good output style for `{seed_text}`: `{seed_text} at home`, `{seed_text} business`, `{seed_text} for beginners`, `{seed_text} setup`, `{seed_text} tips`.\n"
             )
         elif seed_scope == "broad":
             scope_rules = (
@@ -815,6 +961,8 @@ Strategy requirements:
   - monetization potential
   - content repeatability
   - competition weakness
+  {extra_seed_specific_rule}
+  {seed_phrase_rules}
 
   Formatting rules:
   - Each keyword must be natural and human-searchable.
@@ -836,9 +984,117 @@ Output rules:
   - No extra notes.
   """
 
+    def _build_legacy_balanced_prompt(self, seed_text, target_country, target_count, bilingual=False, seed_scope="broad"):
+        if target_country != "Worldwide":
+            native_rules = (
+                f"- Geography focus: {target_country}.\n"
+                f"- Use the natural primary language spoken by YouTube viewers in {target_country}.\n"
+                f"- Reflect realistic local search behavior in {target_country}.\n"
+            )
+        else:
+            native_rules = (
+                "- Geography focus: Worldwide.\n"
+                "- Prefer globally understandable YouTube search phrasing.\n"
+            )
+
+        bilingual_rule = ""
+        if bilingual:
+            bilingual_rule = (
+                "- Bilingual mode: output each keyword as `native language keyword - English translation`.\n"
+            )
+
+        if seed_scope == "broad":
+            scope_rules = (
+                "- The seed keyword is BROAD.\n"
+                "- Return broader, stronger, higher-demand YouTube search terms inside this topic.\n"
+                "- Stay at the main opportunity layer first.\n"
+                "- Do NOT go too deep into tiny sub-niches too early.\n"
+                "- Prefer scalable terms that can support many videos and larger search demand.\n"
+                "- Example behavior: if the seed is `health`, outputs should look closer to `cramp`, `sick`, `lose weight`, `sleep`, `anxiety`, not ultra-specific micro-angles.\n"
+            )
+        else:
+            scope_rules = (
+                "- The seed keyword is already SPECIFIC.\n"
+                "- You should expand into sub-niches, subtopics, and more detailed search opportunities inside this topic.\n"
+                "- It is acceptable to go more specific because the seed is already narrow enough.\n"
+            )
+
+        return f"""You are a senior YouTube niche research strategist and keyword discovery expert.
+
+Your task is to generate up to {target_count} high-opportunity YouTube keyword ideas from the seed keyword below.
+
+Seed keyword: "{seed_text}"
+
+Strategy requirements:
+- Focus on YouTube search intent, not blog SEO or generic topic brainstorming.
+- Prefer keywords that suggest specific sub-niches, repeatable video series, clear audience intent, and practical monetization potential.
+- Favor ideas that can work for solo creators, faceless channels, Shorts, long-form, or both.
+- Avoid broad, generic, saturated, or vague keywords unless they are sharply narrowed.
+- Avoid filler variations that are only tiny wording changes.
+- Do NOT reject a keyword just because it is unusually short, niche, weird, or non-obvious.
+- If a short or uncommon keyword has strong YouTube performance potential, include it.
+- Some strong opportunities may be single-word or two-word terms. That is acceptable if the opportunity is real.
+{scope_rules}
+- Prefer keywords with stronger opportunity through one or more of these:
+  - clearer audience
+  - lower competition angle
+  - better repeatable series potential
+  - stronger search intent
+  - easier production workflow
+  - stronger monetization fit
+- Include a strong mix of keyword types when relevant:
+  - raw short terms
+  - symptom or problem-first terms
+  - condition or topic terms
+  - solution-seeking terms
+  - long-tail search terms
+  - series-friendly sub-niche terms
+- Especially for niches like health, finance, beauty, fitness, education, and software:
+  - actively include short high-intent search terms if they have real performance potential
+  - include pain-point words, symptom words, condition words, or problem words
+  - do not over-convert everything into long-tail phrases
+- Think silently about:
+  - searchability
+  - niche specificity
+  - series potential
+  - faceless suitability
+  - monetization potential
+  - content repeatability
+  - competition weakness
+
+Formatting rules:
+- Each keyword must be natural and human-searchable.
+- Prefer concise keywords, but allow longer keywords when they are more realistic or higher-opportunity.
+- Do not force unnatural phrasing just to keep the keyword short.
+- Some outputs should be very short when appropriate, including single-word and two-word terms.
+- If the seed keyword is broad, include some sharp high-signal short keywords related to the niche.
+- Do not output sentences, explanations, categories, bullet points, numbering, or commentary.
+- Support wildcard * naturally if the seed keyword uses it.
+{native_rules}{bilingual_rule}
+Output rules:
+- Return ONLY a clean comma-separated list.
+- Return the best ideas first.
+- Return no more than {target_count} items.
+- No numbering.
+- No headers.
+- No quotation marks.
+- No markdown.
+- No extra notes.
+"""
+
     def _normalize_prompt_mode(self, prompt_mode):
         text = str(prompt_mode or "").strip().lower()
-        valid_modes = {"balanced", "broad seed", "deep niche", "custom"}
+        valid_modes = {
+            "balanced",
+            "balanced v2",
+            "broad seed",
+            "sub niche",
+            "micro niche",
+            "deep niche",
+            "micro niche expansion",
+            "seed expansion only",
+            "custom",
+        }
         return text if text in valid_modes else "balanced"
 
     def _selected_prompt_mode(self):
